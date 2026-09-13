@@ -21,7 +21,7 @@ artifacts_output/
 *.log
 
 # Datasets & raw images
-data/
+/data/
 
 # Environment & local overrides
 .env
