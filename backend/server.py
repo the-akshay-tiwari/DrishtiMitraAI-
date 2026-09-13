@@ -7,6 +7,7 @@ import io
 import logging
 import sys
 import time
+import tracemalloc
 from pathlib import Path
 
 import numpy as np
@@ -36,10 +37,15 @@ MODEL_VERSION = "v0.2-matlab-netv2-reconstructed"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
 
+class FlushStreamHandler(logging.StreamHandler):
+    def emit(self, record):
+        super().emit(record)
+        self.flush()
+
 logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s] [%(levelname)s] [backend] %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
+    handlers=[FlushStreamHandler(sys.stdout)],
 )
 logger = logging.getLogger("drishtimitra")
 
@@ -62,6 +68,14 @@ active_checkpoint_path: str = ""
 loaded_experiment_id: str = ""
 
 
+def get_memory_usage_mb() -> float:
+    """Returns current traced memory usage in MB using tracemalloc if active."""
+    if tracemalloc.is_tracing():
+        current, _ = tracemalloc.get_traced_memory()
+        return current / (1024 * 1024)
+    return 0.0
+
+
 def pad_to_square(image: Image.Image, bg_color: tuple[int, int, int] = (0, 0, 0)) -> Image.Image:
     """Pad image with black borders to make it 1:1 square without distorting aspect ratio."""
     width, height = image.size
@@ -78,11 +92,16 @@ def pad_to_square(image: Image.Image, bg_color: tuple[int, int, int] = (0, 0, 0)
 def validate_retina_image(image: Image.Image) -> tuple[bool, str]:
     """Validate whether an image is a valid, clear fundus retina image."""
     w, h = image.size
+    logger.info(f"[PREDICT] stage=validation_downsample_start | orig_dimensions={w}x{h}")
+    sys.stdout.flush()
     if w > 1024 or h > 1024:
         val_img = image.copy()
         val_img.thumbnail((1024, 1024), Image.Resampling.BILINEAR)
     else:
         val_img = image
+
+    logger.info(f"[PREDICT] stage=validation_downsample_complete | val_dimensions={val_img.size}")
+    sys.stdout.flush()
 
     img_np = np.array(val_img.convert("RGB"))
     h, w, _ = img_np.shape
@@ -116,12 +135,16 @@ def validate_retina_image(image: Image.Image) -> tuple[bool, str]:
         return False, "The image does not match the color profile of a retinal fundus scan. Please upload a valid retina image."
 
     # Blur / Quality Check using discrete Laplacian variance
+    logger.info("[PREDICT] stage=validation_blur_check_start")
+    sys.stdout.flush()
     gray = np.mean(img_np, axis=2).astype(np.float32)
     if gray.shape[0] > 10 and gray.shape[1] > 10:
         laplacian = (
             gray[2:, 1:-1] + gray[:-2, 1:-1] + gray[1:-1, 2:] + gray[1:-1, :-2] - 4 * gray[1:-1, 1:-1]
         )
         blur_variance = float(np.var(laplacian))
+        logger.info(f"[PREDICT] stage=validation_blur_check_complete | blur_variance={blur_variance:.2f}")
+        sys.stdout.flush()
         if blur_variance < 5.0:
             return False, "Image is too blurry or out of focus to perform diabetic retinopathy screening. Please upload a clearer capture."
 
@@ -221,7 +244,7 @@ def load_model() -> None:
         class_names = ["0", "1", "2", "3", "4"]
         active_checkpoint_path = str(MATLAB_FULL_WEIGHTS_PATH)
         loaded_experiment_id = MODEL_VERSION
-        transform = None  # Using custom MatlabNetV2Reconstructed.preprocess_image
+        transform = None
     else:
         target_path = E02_CHECKPOINT_PATH if E02_CHECKPOINT_PATH.is_file() else BASELINE_PATH
         if not target_path.is_file():
@@ -249,6 +272,7 @@ def load_model() -> None:
 
 @app.on_event("startup")
 def startup() -> None:
+    tracemalloc.start()
     load_model()
     from backend.netv2_reconstruction import MatlabNetV2Reconstructed
 
@@ -267,7 +291,9 @@ def startup() -> None:
             logger.info("Expected input shape: [1, 3, 384, 384]")
     logger.info(f"Active checkpoint path: {active_checkpoint_path}")
     logger.info(f"Checkpoint file exists: {Path(active_checkpoint_path).is_file() if active_checkpoint_path else False}")
+    logger.info(f"Startup memory tracing active: {tracemalloc.is_tracing()}")
     logger.info("==========================================================================")
+    sys.stdout.flush()
 
 
 @app.get("/health")
@@ -280,6 +306,7 @@ def health() -> dict[str, object]:
         "loaded_checkpoint": active_checkpoint_path,
         "experiment_id": loaded_experiment_id,
         "target_layer": "head_conv.conv (Reconstructed EfficientNet-B0 final conv layer)",
+        "traced_memory_mb": round(get_memory_usage_mb(), 2),
         "medical_disclaimer": "AI attention heatmap generated via PyTorch Grad-CAM (auxiliary explainability representation). Experimental software only; not for clinical diagnosis.",
     }
 
@@ -290,7 +317,8 @@ async def predict(image: UploadFile = File(...)) -> dict[str, object]:
     stage = "request_received"
 
     try:
-        logger.info(f"[PREDICT] request received | filename={image.filename} | content_type={image.content_type}")
+        logger.info(f"[PREDICT] stage=request_received | filename={image.filename} | content_type={image.content_type}")
+        sys.stdout.flush()
 
         if model is None:
             raise HTTPException(status_code=503, detail="No trained model found.")
@@ -308,8 +336,8 @@ async def predict(image: UploadFile = File(...)) -> dict[str, object]:
             logger.warning("[PREDICT][WARN] Empty image file received.")
             raise HTTPException(status_code=400, detail="The uploaded file is empty.")
 
-        # Stage 1: image_decoding
-        stage = "image_decoding"
+        # Stage 1: image_decoded
+        stage = "image_decoded"
         try:
             with Image.open(io.BytesIO(contents)) as uploaded:
                 rgb_image = uploaded.convert("RGB")
@@ -318,31 +346,62 @@ async def predict(image: UploadFile = File(...)) -> dict[str, object]:
             raise HTTPException(status_code=400, detail="The uploaded file is not a valid image.") from error
 
         orig_w, orig_h = rgb_image.size
-        logger.info(f"[PREDICT] image decoded | dimensions={orig_w}x{orig_h} | bytes={len(contents)}")
+        logger.info(f"[PREDICT] stage=image_decoded | mode={rgb_image.mode} | dimensions={orig_w}x{orig_h} | bytes={len(contents)}")
+        sys.stdout.flush()
 
-        # Stage 2: image_validation
-        stage = "image_validation"
+        # Stage 2: validation_start / validation_complete
+        stage = "validation_start"
+        logger.info("[PREDICT] stage=validation_start")
+        sys.stdout.flush()
+        
         is_valid_retina, error_reason = validate_retina_image(rgb_image)
         if not is_valid_retina:
             logger.warning(f"[PREDICT][WARN] Retina validation rejected: {error_reason}")
             raise HTTPException(status_code=400, detail=error_reason)
 
+        stage = "validation_complete"
+        logger.info("[PREDICT] stage=validation_complete")
+        sys.stdout.flush()
+
         from backend.netv2_reconstruction import MatlabNetV2Reconstructed
 
-        # Stage 3: preprocessing
-        stage = "preprocessing"
+        # Stage 3: preprocess_start / preprocess_complete
+        stage = "preprocess_start"
+        logger.info(f"[PREDICT] stage=preprocess_start | mem_before_mb={get_memory_usage_mb():.2f}MB")
+        sys.stdout.flush()
+
         if isinstance(model, MatlabNetV2Reconstructed):
+            logger.info("[PREDICT] stage=pil_resize_start | target_size=(224, 224)")
+            sys.stdout.flush()
             resized_image = rgb_image.resize((224, 224), resample=Image.Resampling.BILINEAR)
-            image_tensor = model.preprocess_image(np.array(resized_image)).to(DEVICE)
+            logger.info("[PREDICT] stage=pil_resize_complete")
+            sys.stdout.flush()
+
+            logger.info("[PREDICT] stage=numpy_convert_start")
+            sys.stdout.flush()
+            arr_224 = np.array(resized_image)
+            arr_mb = arr_224.nbytes / (1024 * 1024)
+            logger.info(f"[PREDICT] stage=numpy_convert_complete | array_shape={arr_224.shape} | array_dtype={arr_224.dtype} | memory_size={arr_mb:.3f}MB")
+            sys.stdout.flush()
+
+            logger.info("[PREDICT] stage=tensor_conversion_start")
+            sys.stdout.flush()
+            image_tensor = model.preprocess_image(arr_224).to(DEVICE)
+            logger.info(f"[PREDICT] stage=tensor_conversion_complete | tensor_shape={list(image_tensor.shape)} | dtype={image_tensor.dtype} | device={image_tensor.device}")
+            sys.stdout.flush()
         else:
             padded_image = pad_to_square(rgb_image)
             image_tensor = transform(padded_image).unsqueeze(0).to(DEVICE)
 
-        logger.info(f"[PREDICT] preprocessing complete | tensor_shape={list(image_tensor.shape)} | device={image_tensor.device}")
+        stage = "preprocess_complete"
+        logger.info(f"[PREDICT] stage=preprocess_complete | mem_after_mb={get_memory_usage_mb():.2f}MB")
+        sys.stdout.flush()
 
-        # Stage 4: classifier_inference
-        stage = "classifier_inference"
-        logger.info(f"[PREDICT] classifier inference started | model={type(model).__name__}")
+        # Stage 4: model_inference_start / model_inference_complete
+        stage = "model_inference_start"
+        logger.info(f"[PREDICT] stage=model_inference_start | model={type(model).__name__}")
+        sys.stdout.flush()
+
         inf_start = time.perf_counter()
         with torch.no_grad():
             p_orig = torch.softmax(model(image_tensor), dim=1)
@@ -354,16 +413,27 @@ async def predict(image: UploadFile = File(...)) -> dict[str, object]:
             probabilities = probs_tensor[0].cpu().tolist()
         inf_ms = round((time.perf_counter() - inf_start) * 1000, 2)
         grade = int(max(range(len(probabilities)), key=probabilities.__getitem__))
-        logger.info(f"[PREDICT] classifier inference complete | grade={grade} | confidence={probabilities[grade]:.4f} | latency={inf_ms}ms")
 
-        # Stage 5: gradcam_generation
-        stage = "gradcam_generation"
-        logger.info("[PREDICT] Grad-CAM started")
+        stage = "model_inference_complete"
+        logger.info(f"[PREDICT] stage=model_inference_complete | grade={grade} | confidence={probabilities[grade]:.4f} | latency={inf_ms}ms")
+        sys.stdout.flush()
+
+        # Stage 5: gradcam_start / gradcam_complete
+        stage = "gradcam_start"
+        logger.info("[PREDICT] stage=gradcam_start")
+        sys.stdout.flush()
+
         heatmap_b64, gradcam_ms = generate_gradcam(model, image_tensor, grade)
-        logger.info(f"[PREDICT] Grad-CAM complete | heatmap_len={len(heatmap_b64)} | latency={gradcam_ms}ms")
 
-        # Stage 6: response_construction
-        stage = "response_construction"
+        stage = "gradcam_complete"
+        logger.info(f"[PREDICT] stage=gradcam_complete | heatmap_len={len(heatmap_b64)} | latency={gradcam_ms}ms")
+        sys.stdout.flush()
+
+        # Stage 6: response_build_start / response_build_complete
+        stage = "response_build_start"
+        logger.info("[PREDICT] stage=response_build_start")
+        sys.stdout.flush()
+
         total_ms = round((time.perf_counter() - predict_start) * 1000, 2)
         response_data = {
             "model_version": MODEL_VERSION,
@@ -381,14 +451,19 @@ async def predict(image: UploadFile = File(...)) -> dict[str, object]:
                 "experiment_id": loaded_experiment_id,
             },
         }
-        logger.info(f"[PREDICT] response construction complete | total_latency={total_ms}ms")
+
+        stage = "response_build_complete"
+        logger.info(f"[PREDICT] stage=response_build_complete | total_latency={total_ms}ms")
+        sys.stdout.flush()
         return response_data
 
     except HTTPException:
+        sys.stdout.flush()
         raise
     except Exception as exc:
         logger.error(f"[PREDICT][ERROR] stage={stage}")
-        logger.exception(f"Unhandled exception during prediction at stage '{stage}': {exc}")
+        logger.exception(f"[PREDICT][EXCEPTION] Unhandled error at stage '{stage}': {exc}")
+        sys.stdout.flush()
         raise HTTPException(
             status_code=502,
             detail=f"Inference failed during stage '{stage}': {type(exc).__name__} - {str(exc)}"
