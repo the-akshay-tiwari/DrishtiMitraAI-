@@ -1,0 +1,30 @@
+# DrishtiMitra Consolidated Repository .gitignore
+
+# Compiled web assets & node modules
+dist/
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Python virtual environments & bytecode
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# MATLAB cache & generated files
+*.asv
+*.mex*
+slprj/
+artifacts_output/
+*.log
+
+# Datasets & raw images
+data/
+
+# Environment & local overrides
+.env
+.env.local
+.DS_Store
+Thumbs.db

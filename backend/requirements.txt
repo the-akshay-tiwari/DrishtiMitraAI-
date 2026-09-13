@@ -1,0 +1,11 @@
+# Training and local inference for the DrishtiMitra research prototype.
+torch>=2.6,<2.8
+torchvision>=0.21,<0.23
+numpy>=2.0,<3.0
+Pillow>=10.0,<12.0
+scikit-learn>=1.5,<1.8
+scipy>=1.10,<2.0
+opencv-python-headless>=4.8,<5.0
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+python-multipart>=0.0.20,<1.0

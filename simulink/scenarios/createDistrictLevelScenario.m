@@ -1,0 +1,9 @@
+function scenario = createDistrictLevelScenario(outputFile)
+%CREATEDISTRICTLEVELSCENARIO Create assumptions; latency remains unmeasured until timed.
+if nargin<1, outputFile=fullfile(fileparts(mfilename('fullpath')),'districtLevel_100k.mat'); end
+scenario=struct('annualPatients',100000,'choCenters',50,'stationsPerCenter',1, ...
+ 'imagesPerStationHour',5,'workDaysPerYear',250,'imageMB',8,'uplinkMbps',5, ...
+ 'storeForwardFraction',.4,'measuredPipelineSeconds',NaN,'parallelWorkers',1, ...
+ 'referableRate',NaN,'reviewSeconds',30,'specialists',1,'workHoursPerDay',8);
+save(outputFile,'scenario');
+end

@@ -1,0 +1,22 @@
+# Docker build ignore rules
+.git
+.gitignore
+.venv
+.python312
+node_modules
+*.md
+*.log
+*.zip
+
+# Ignore heavy training datasets and experiments, but keep baseline checkpoint
+data/
+archive/
+artifacts/experiments/
+artifacts/checkpoints/
+artifacts/plots/
+artifacts/baseline_metrics.json
+artifacts/error_analysis.json
+artifacts/per_class_metrics.json
+artifacts/misclassified_samples.csv
+artifacts/confusion_matrix*.png
+artifacts/normalized_confusion_matrix*.png
