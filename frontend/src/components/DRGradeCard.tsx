@@ -16,7 +16,7 @@ export function DRGradeCard({ detail, prominent = false, prediction }: { detail:
         <p className="text-xs font-bold uppercase tracking-[0.12em] text-slate-500">Screening recommendation</p>
         <p className="mt-1.5 text-sm font-semibold leading-6 text-slate-800">{detail.recommendation}</p>
       </div>
-      <p className="mt-4 text-xs leading-5 text-slate-500">{prediction === undefined ? 'Prototype demonstration — deterministic result mapped to the selected supplied IDRiD demo image.' : `Experimental local-model output · ${(prediction * 100).toFixed(1)}% top-class confidence.`} AI-assisted screening, not autonomous diagnosis.</p>
+      <p className="mt-4 text-xs leading-5 text-slate-500">{prediction === undefined ? 'Prototype demonstration — deterministic result mapped to the selected supplied IDRiD demo image.' : `Experimental model output · ${(prediction * 100).toFixed(1)}% top-class confidence.`} AI-assisted screening, not autonomous diagnosis.</p>
     </div>
   )
 }
