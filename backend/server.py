@@ -1,12 +1,16 @@
-"""Local FastAPI inference service for the trained DrishtiMitra research model."""
+"""FastAPI inference service for the trained DrishtiMitra research model."""
 
 from __future__ import annotations
 
 import base64
 import io
+import logging
+import sys
+import time
 from pathlib import Path
 
 import numpy as np
+import scipy.io
 import torch
 import torch.nn.functional as F
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -17,24 +21,29 @@ from PIL import Image, UnidentifiedImageError
 from torchvision.models import efficientnet_b0
 from torchvision.transforms import v2
 
-
-import time
-
-import sys
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+MATLAB_WEIGHTS_PATH = PROJECT_ROOT / "artifacts" / "matlab_dr_classifier_v2_weights.mat"
 E02_CHECKPOINT_PATH = PROJECT_ROOT / "artifacts" / "experiments" / "E02_no_sampler_35ep" / "checkpoint.pt"
 BASELINE_PATH = PROJECT_ROOT / "artifacts" / "drishtimitra_efficientnet_b0.pt"
 DIST_DIR = PROJECT_ROOT / "dist"
 ASSETS_DIR = DIST_DIR / "assets"
 ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 
+MODEL_VERSION = "v0.2-matlab-netv2-reconstructed"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
 
-app = FastAPI(title="DrishtiMitra experimental inference API", version="0.1.0")
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] [%(levelname)s] [backend] %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+logger = logging.getLogger("drishtimitra")
+
+app = FastAPI(title="DrishtiMitra experimental inference API", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -47,7 +56,7 @@ app.add_middleware(
 app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
 
 model: torch.nn.Module | None = None
-class_names: list[str] = []
+class_names: list[str] = ["0", "1", "2", "3", "4"]
 transform: v2.Compose | None = None
 active_checkpoint_path: str = ""
 loaded_experiment_id: str = ""
@@ -68,7 +77,14 @@ def pad_to_square(image: Image.Image, bg_color: tuple[int, int, int] = (0, 0, 0)
 
 def validate_retina_image(image: Image.Image) -> tuple[bool, str]:
     """Validate whether an image is a valid, clear fundus retina image."""
-    img_np = np.array(image.convert("RGB"))
+    w, h = image.size
+    if w > 1024 or h > 1024:
+        val_img = image.copy()
+        val_img.thumbnail((1024, 1024), Image.Resampling.BILINEAR)
+    else:
+        val_img = image
+
+    img_np = np.array(val_img.convert("RGB"))
     h, w, _ = img_np.shape
 
     if h < 64 or w < 64:
@@ -137,19 +153,22 @@ def generate_gradcam(
         activations.append(output)
 
     def backward_hook(module, grad_in, grad_out):
-        gradients.append(grad_out[0])
+        if grad_out and len(grad_out) > 0 and grad_out[0] is not None:
+            gradients.append(grad_out[0])
 
     h1 = target_layer.register_forward_hook(forward_hook)
     h2 = target_layer.register_full_backward_hook(backward_hook)
 
     try:
-        input_var = image_tensor.clone().detach().requires_grad_(True)
-        target_model.zero_grad()
-        logits = target_model(input_var)
-        score = logits[0, target_class]
-        score.backward()
+        with torch.enable_grad():
+            input_var = image_tensor.clone().detach().requires_grad_(True)
+            target_model.zero_grad()
+            logits = target_model(input_var)
+            score = logits[0, target_class]
+            score.backward()
 
         if not activations or not gradients:
+            logger.warning("[GRAD-CAM] No activations or gradients captured.")
             return "", round((time.perf_counter() - cam_start) * 1000, 2)
 
         act = activations[0]
@@ -180,44 +199,14 @@ def generate_gradcam(
         cam_ms = round((time.perf_counter() - cam_start) * 1000, 2)
         return f"data:image/png;base64,{b64_str}", cam_ms
     except Exception as exc:
-        print(f"Warning: Grad-CAM generation failed: {exc}")
+        logger.warning(f"[GRAD-CAM] Grad-CAM generation failed: {exc}")
+        logger.exception(exc)
         cam_ms = round((time.perf_counter() - cam_start) * 1000, 2)
         return "", cam_ms
     finally:
         h1.remove()
         h2.remove()
-
-import scipy.io
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-MATLAB_WEIGHTS_PATH = PROJECT_ROOT / "artifacts" / "matlab_dr_classifier_v2_weights.mat"
-E02_CHECKPOINT_PATH = PROJECT_ROOT / "artifacts" / "experiments" / "E02_no_sampler_35ep" / "checkpoint.pt"
-BASELINE_PATH = PROJECT_ROOT / "artifacts" / "drishtimitra_efficientnet_b0.pt"
-DIST_DIR = PROJECT_ROOT / "dist"
-ASSETS_DIR = DIST_DIR / "assets"
-ASSETS_DIR.mkdir(parents=True, exist_ok=True)
-
-MODEL_VERSION = "v0.2-matlab-netv2-reconstructed"
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-MAX_IMAGE_BYTES = 12 * 1024 * 1024
-
-app = FastAPI(title="DrishtiMitra experimental inference API", version="0.2.0")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Mount static assets top-level BEFORE route definitions so /assets/* is handled by StaticFiles
-app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
-
-model: torch.nn.Module | None = None
-class_names: list[str] = ["0", "1", "2", "3", "4"]
-transform: v2.Compose | None = None
-active_checkpoint_path: str = ""
-loaded_experiment_id: str = ""
+        target_model.zero_grad()
 
 
 def load_model() -> None:
@@ -226,7 +215,7 @@ def load_model() -> None:
     from backend.netv2_reconstruction import MATLAB_FULL_WEIGHTS_PATH, MatlabNetV2Reconstructed
 
     if MATLAB_FULL_WEIGHTS_PATH.is_file():
-        print(f"Loading 100% reconstructed MATLAB netV2 model from: {MATLAB_FULL_WEIGHTS_PATH}")
+        logger.info(f"Loading 100% reconstructed MATLAB netV2 model from: {MATLAB_FULL_WEIGHTS_PATH}")
         rec_model = MatlabNetV2Reconstructed(MATLAB_FULL_WEIGHTS_PATH)
         model = rec_model.to(DEVICE).eval()
         class_names = ["0", "1", "2", "3", "4"]
@@ -238,7 +227,7 @@ def load_model() -> None:
         if not target_path.is_file():
             raise FileNotFoundError(f"No checkpoint or weights file found at: {MATLAB_FULL_WEIGHTS_PATH}")
 
-        print(f"Loading legacy PyTorch model from: {target_path}")
+        logger.info(f"Loading legacy PyTorch model from: {target_path}")
         checkpoint = torch.load(target_path, map_location=DEVICE, weights_only=False)
         class_names = checkpoint.get("class_names", ["0", "1", "2", "3", "4"])
         loaded_model = efficientnet_b0(weights=None)
@@ -261,6 +250,24 @@ def load_model() -> None:
 @app.on_event("startup")
 def startup() -> None:
     load_model()
+    from backend.netv2_reconstruction import MatlabNetV2Reconstructed
+
+    logger.info("================ DRISHTIMITRA BACKEND STARTUP DIAGNOSTICS ================")
+    logger.info(f"Model loaded: {model is not None}")
+    logger.info(f"Model version: {MODEL_VERSION}")
+    logger.info(f"Model instance: {type(model).__name__ if model else 'None'}")
+    logger.info(f"Device: {DEVICE}")
+    if model is not None:
+        model_device = next(model.parameters()).device.type
+        logger.info(f"Model is on CPU: {model_device == 'cpu'}")
+        logger.info(f"Model is in eval mode: {not model.training}")
+        if isinstance(model, MatlabNetV2Reconstructed):
+            logger.info("Expected input shape: [1, 3, 224, 224]")
+        else:
+            logger.info("Expected input shape: [1, 3, 384, 384]")
+    logger.info(f"Active checkpoint path: {active_checkpoint_path}")
+    logger.info(f"Checkpoint file exists: {Path(active_checkpoint_path).is_file() if active_checkpoint_path else False}")
+    logger.info("==========================================================================")
 
 
 @app.get("/health")
@@ -280,72 +287,112 @@ def health() -> dict[str, object]:
 @app.post("/predict")
 async def predict(image: UploadFile = File(...)) -> dict[str, object]:
     predict_start = time.perf_counter()
-    if model is None:
-        raise HTTPException(status_code=503, detail="No trained model found.")
-
-    content_type = (image.content_type or "").lower()
-    if content_type and not (content_type.startswith("image/") or content_type == "application/octet-stream"):
-        raise HTTPException(status_code=415, detail="Upload a JPEG, PNG, or WebP fundus image.")
-
-    contents = await image.read(MAX_IMAGE_BYTES + 1)
-    if len(contents) > MAX_IMAGE_BYTES:
-        raise HTTPException(status_code=413, detail="Image exceeds the 12 MB limit.")
-    if len(contents) == 0:
-        raise HTTPException(status_code=400, detail="The uploaded file is empty.")
+    stage = "request_received"
 
     try:
-        with Image.open(io.BytesIO(contents)) as uploaded:
-            rgb_image = uploaded.convert("RGB")
-    except (UnidentifiedImageError, OSError) as error:
-        raise HTTPException(status_code=400, detail="The uploaded file is not a valid image.") from error
+        logger.info(f"[PREDICT] request received | filename={image.filename} | content_type={image.content_type}")
 
-    # 1. Quality & Non-retina validation check
-    is_valid_retina, error_reason = validate_retina_image(rgb_image)
-    if not is_valid_retina:
-        raise HTTPException(status_code=400, detail=error_reason)
+        if model is None:
+            raise HTTPException(status_code=503, detail="No trained model found.")
 
-    from backend.netv2_reconstruction import MatlabNetV2Reconstructed
+        content_type = (image.content_type or "").lower()
+        if content_type and not (content_type.startswith("image/") or content_type == "application/octet-stream"):
+            logger.warning(f"[PREDICT][WARN] Invalid content_type: {content_type}")
+            raise HTTPException(status_code=415, detail="Upload a JPEG, PNG, or WebP fundus image.")
 
-    # 2. Image Preprocessing & Tensor Conversion
-    if isinstance(model, MatlabNetV2Reconstructed):
-        # Resize to MATLAB 224x224 input size
-        resized_image = rgb_image.resize((224, 224), resample=Image.Resampling.BILINEAR)
-        image_tensor = model.preprocess_image(np.array(resized_image)).to(DEVICE)
-    else:
-        padded_image = pad_to_square(rgb_image)
-        image_tensor = transform(padded_image).unsqueeze(0).to(DEVICE)
+        contents = await image.read(MAX_IMAGE_BYTES + 1)
+        if len(contents) > MAX_IMAGE_BYTES:
+            logger.warning(f"[PREDICT][WARN] Image size exceeds limit: {len(contents)} > {MAX_IMAGE_BYTES}")
+            raise HTTPException(status_code=413, detail="Image exceeds the 12 MB limit.")
+        if len(contents) == 0:
+            logger.warning("[PREDICT][WARN] Empty image file received.")
+            raise HTTPException(status_code=400, detail="The uploaded file is empty.")
 
-    # 3. Model Forward Pass
-    with torch.no_grad():
-        p_orig = torch.softmax(model(image_tensor), dim=1)
+        # Stage 1: image_decoding
+        stage = "image_decoding"
+        try:
+            with Image.open(io.BytesIO(contents)) as uploaded:
+                rgb_image = uploaded.convert("RGB")
+        except (UnidentifiedImageError, OSError) as error:
+            logger.warning(f"[PREDICT][WARN] Failed to decode image: {error}")
+            raise HTTPException(status_code=400, detail="The uploaded file is not a valid image.") from error
+
+        orig_w, orig_h = rgb_image.size
+        logger.info(f"[PREDICT] image decoded | dimensions={orig_w}x{orig_h} | bytes={len(contents)}")
+
+        # Stage 2: image_validation
+        stage = "image_validation"
+        is_valid_retina, error_reason = validate_retina_image(rgb_image)
+        if not is_valid_retina:
+            logger.warning(f"[PREDICT][WARN] Retina validation rejected: {error_reason}")
+            raise HTTPException(status_code=400, detail=error_reason)
+
+        from backend.netv2_reconstruction import MatlabNetV2Reconstructed
+
+        # Stage 3: preprocessing
+        stage = "preprocessing"
         if isinstance(model, MatlabNetV2Reconstructed):
-            probs_tensor = p_orig
+            resized_image = rgb_image.resize((224, 224), resample=Image.Resampling.BILINEAR)
+            image_tensor = model.preprocess_image(np.array(resized_image)).to(DEVICE)
         else:
-            p_hflip = torch.softmax(model(torch.flip(image_tensor, dims=[3])), dim=1)
-            probs_tensor = (p_orig + p_hflip) / 2.0
-        probabilities = probs_tensor[0].cpu().tolist()
-    grade = int(max(range(len(probabilities)), key=probabilities.__getitem__))
+            padded_image = pad_to_square(rgb_image)
+            image_tensor = transform(padded_image).unsqueeze(0).to(DEVICE)
 
-    # 4. Grad-CAM Explainability Heatmap & Latency Measurement
-    heatmap_b64, gradcam_ms = generate_gradcam(model, image_tensor, grade)
-    total_ms = round((time.perf_counter() - predict_start) * 1000, 2)
+        logger.info(f"[PREDICT] preprocessing complete | tensor_shape={list(image_tensor.shape)} | device={image_tensor.device}")
 
-    return {
-        "model_version": MODEL_VERSION,
-        "grade": grade,
-        "label": class_names[grade],
-        "confidence": round(probabilities[grade], 4),
-        "probabilities": {str(index): round(probability, 4) for index, probability in enumerate(probabilities)},
-        "heatmap": heatmap_b64,
-        "medical_disclaimer": "AI attention heatmap highlighting regions that influenced model prediction. Experimental software only; not for clinical diagnosis.",
-        "performance_metrics": {
-            "prediction_latency_ms": total_ms,
-            "gradcam_latency_ms": gradcam_ms,
-            "inference_strategy": "AVG_2X (Original + Horizontal Flip TTA Average)",
-            "forward_passes": 2,
-            "experiment_id": loaded_experiment_id,
-        },
-    }
+        # Stage 4: classifier_inference
+        stage = "classifier_inference"
+        logger.info(f"[PREDICT] classifier inference started | model={type(model).__name__}")
+        inf_start = time.perf_counter()
+        with torch.no_grad():
+            p_orig = torch.softmax(model(image_tensor), dim=1)
+            if isinstance(model, MatlabNetV2Reconstructed):
+                probs_tensor = p_orig
+            else:
+                p_hflip = torch.softmax(model(torch.flip(image_tensor, dims=[3])), dim=1)
+                probs_tensor = (p_orig + p_hflip) / 2.0
+            probabilities = probs_tensor[0].cpu().tolist()
+        inf_ms = round((time.perf_counter() - inf_start) * 1000, 2)
+        grade = int(max(range(len(probabilities)), key=probabilities.__getitem__))
+        logger.info(f"[PREDICT] classifier inference complete | grade={grade} | confidence={probabilities[grade]:.4f} | latency={inf_ms}ms")
+
+        # Stage 5: gradcam_generation
+        stage = "gradcam_generation"
+        logger.info("[PREDICT] Grad-CAM started")
+        heatmap_b64, gradcam_ms = generate_gradcam(model, image_tensor, grade)
+        logger.info(f"[PREDICT] Grad-CAM complete | heatmap_len={len(heatmap_b64)} | latency={gradcam_ms}ms")
+
+        # Stage 6: response_construction
+        stage = "response_construction"
+        total_ms = round((time.perf_counter() - predict_start) * 1000, 2)
+        response_data = {
+            "model_version": MODEL_VERSION,
+            "grade": grade,
+            "label": class_names[grade] if grade < len(class_names) else str(grade),
+            "confidence": round(probabilities[grade], 4),
+            "probabilities": {str(index): round(probability, 4) for index, probability in enumerate(probabilities)},
+            "heatmap": heatmap_b64,
+            "medical_disclaimer": "AI attention heatmap highlighting regions that influenced model prediction. Experimental software only; not for clinical diagnosis.",
+            "performance_metrics": {
+                "prediction_latency_ms": total_ms,
+                "gradcam_latency_ms": gradcam_ms,
+                "inference_strategy": "Direct Forward Pass" if isinstance(model, MatlabNetV2Reconstructed) else "AVG_2X (Original + Horizontal Flip TTA Average)",
+                "forward_passes": 1 if isinstance(model, MatlabNetV2Reconstructed) else 2,
+                "experiment_id": loaded_experiment_id,
+            },
+        }
+        logger.info(f"[PREDICT] response construction complete | total_latency={total_ms}ms")
+        return response_data
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"[PREDICT][ERROR] stage={stage}")
+        logger.exception(f"Unhandled exception during prediction at stage '{stage}': {exc}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Inference failed during stage '{stage}': {type(exc).__name__} - {str(exc)}"
+        ) from exc
 
 
 # Mount compiled React assets and SPA fallback
@@ -365,7 +412,3 @@ async def serve_spa(full_path: str):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
-
-
-
