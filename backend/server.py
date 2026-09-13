@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import io
 import logging
+import os
 import sys
 import time
 import tracemalloc
@@ -37,10 +38,12 @@ MODEL_VERSION = "v0.2-matlab-netv2-reconstructed"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
 
+
 class FlushStreamHandler(logging.StreamHandler):
     def emit(self, record):
         super().emit(record)
         self.flush()
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -58,7 +61,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount static assets top-level BEFORE route definitions so /assets/* is handled by StaticFiles
 app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
 
 model: torch.nn.Module | None = None
@@ -68,12 +70,48 @@ active_checkpoint_path: str = ""
 loaded_experiment_id: str = ""
 
 
-def get_memory_usage_mb() -> float:
-    """Returns current traced memory usage in MB using tracemalloc if active."""
-    if tracemalloc.is_tracing():
-        current, _ = tracemalloc.get_traced_memory()
-        return current / (1024 * 1024)
+def get_process_rss_mb() -> float:
+    """Returns process Resident Set Size (RSS) in MB using /proc/self/status on Linux or psutil fallback."""
+    proc_status = Path("/proc/self/status")
+    if proc_status.is_file():
+        try:
+            with open(proc_status, "r") as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            return round(float(parts[1]) / 1024.0, 2)
+        except Exception:
+            pass
+
+    try:
+        import psutil
+        return round(psutil.Process(os.getpid()).memory_info().rss / (1024.0 * 1024.0), 2)
+    except Exception:
+        pass
+
+    try:
+        import resource
+        return round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0, 2)
+    except Exception:
+        pass
+
     return 0.0
+
+
+def get_model_diagnostics(target_model: torch.nn.Module, image_tensor: torch.Tensor) -> dict[str, object]:
+    """Returns explicit diagnostic details of target model and input tensor."""
+    param_count = sum(p.numel() for p in target_model.parameters())
+    first_param_device = next(target_model.parameters()).device
+    return {
+        "model_class": type(target_model).__name__,
+        "model_device": str(first_param_device),
+        "model_eval_mode": not target_model.training,
+        "tensor_shape": list(image_tensor.shape),
+        "tensor_dtype": str(image_tensor.dtype),
+        "tensor_device": str(image_tensor.device),
+        "parameter_count": param_count,
+    }
 
 
 def pad_to_square(image: Image.Image, bg_color: tuple[int, int, int] = (0, 0, 0)) -> Image.Image:
@@ -92,8 +130,10 @@ def pad_to_square(image: Image.Image, bg_color: tuple[int, int, int] = (0, 0, 0)
 def validate_retina_image(image: Image.Image) -> tuple[bool, str]:
     """Validate whether an image is a valid, clear fundus retina image."""
     w, h = image.size
-    logger.info(f"[PREDICT] stage=validation_downsample_start | orig_dimensions={w}x{h}")
+    rss_val_start = get_process_rss_mb()
+    logger.info(f"[PREDICT] stage=validation_downsample_start | orig_dimensions={w}x{h} | rss_mb={rss_val_start}MB")
     sys.stdout.flush()
+
     if w > 1024 or h > 1024:
         val_img = image.copy()
         val_img.thumbnail((1024, 1024), Image.Resampling.BILINEAR)
@@ -119,11 +159,9 @@ def validate_retina_image(image: Image.Image) -> tuple[bool, str]:
     g_mean = float(np.mean(img_np[:, :, 1]))
     b_mean = float(np.mean(img_np[:, :, 2]))
 
-    # In fundus retina images, Red channel dominates over Blue channel (R > B)
     if r_mean < b_mean * 1.05 and r_mean < 40.0:
         return False, "The uploaded image does not appear to be a retinal fundus image. Please upload a valid retina scan."
 
-    # Center crop check (retina circular field)
     center_h_start, center_h_end = int(h * 0.2), int(h * 0.8)
     center_w_start, center_w_end = int(w * 0.2), int(w * 0.8)
     center_crop = img_np[center_h_start:center_h_end, center_w_start:center_w_end]
@@ -134,7 +172,6 @@ def validate_retina_image(image: Image.Image) -> tuple[bool, str]:
     if center_r < center_b * 1.08 and center_r < 35.0:
         return False, "The image does not match the color profile of a retinal fundus scan. Please upload a valid retina image."
 
-    # Blur / Quality Check using discrete Laplacian variance
     logger.info("[PREDICT] stage=validation_blur_check_start")
     sys.stdout.flush()
     gray = np.mean(img_np, axis=2).astype(np.float32)
@@ -156,11 +193,7 @@ def generate_gradcam(
     image_tensor: torch.Tensor,
     target_class: int,
 ) -> tuple[str, float]:
-    """Computes Gradient-Weighted Class Activation Mapping (Grad-CAM) for target class.
-    
-    Generates an AI attention/explainability heatmap showing regions influencing prediction.
-    It does NOT segment or identify specific retinal lesions.
-    """
+    """Computes Gradient-Weighted Class Activation Mapping (Grad-CAM) for target class."""
     cam_start = time.perf_counter()
     if hasattr(target_model, "head_conv"):
         target_layer = target_model.head_conv.conv
@@ -272,10 +305,10 @@ def load_model() -> None:
 
 @app.on_event("startup")
 def startup() -> None:
-    tracemalloc.start()
     load_model()
     from backend.netv2_reconstruction import MatlabNetV2Reconstructed
 
+    rss_mb = get_process_rss_mb()
     logger.info("================ DRISHTIMITRA BACKEND STARTUP DIAGNOSTICS ================")
     logger.info(f"Model loaded: {model is not None}")
     logger.info(f"Model version: {MODEL_VERSION}")
@@ -283,21 +316,24 @@ def startup() -> None:
     logger.info(f"Device: {DEVICE}")
     if model is not None:
         model_device = next(model.parameters()).device.type
+        param_count = sum(p.numel() for p in model.parameters())
         logger.info(f"Model is on CPU: {model_device == 'cpu'}")
         logger.info(f"Model is in eval mode: {not model.training}")
+        logger.info(f"Model parameter count: {param_count:,}")
         if isinstance(model, MatlabNetV2Reconstructed):
             logger.info("Expected input shape: [1, 3, 224, 224]")
         else:
             logger.info("Expected input shape: [1, 3, 384, 384]")
     logger.info(f"Active checkpoint path: {active_checkpoint_path}")
     logger.info(f"Checkpoint file exists: {Path(active_checkpoint_path).is_file() if active_checkpoint_path else False}")
-    logger.info(f"Startup memory tracing active: {tracemalloc.is_tracing()}")
+    logger.info(f"Process RSS memory at startup: {rss_mb} MB")
     logger.info("==========================================================================")
     sys.stdout.flush()
 
 
 @app.get("/health")
 def health() -> dict[str, object]:
+    rss_mb = get_process_rss_mb()
     return {
         "status": "ready" if model is not None else "model_not_trained",
         "model_version": MODEL_VERSION,
@@ -306,8 +342,121 @@ def health() -> dict[str, object]:
         "loaded_checkpoint": active_checkpoint_path,
         "experiment_id": loaded_experiment_id,
         "target_layer": "head_conv.conv (Reconstructed EfficientNet-B0 final conv layer)",
-        "traced_memory_mb": round(get_memory_usage_mb(), 2),
+        "process_rss_mb": rss_mb,
         "medical_disclaimer": "AI attention heatmap generated via PyTorch Grad-CAM (auxiliary explainability representation). Experimental software only; not for clinical diagnosis.",
+    }
+
+
+@app.post("/debug/inference")
+async def debug_inference(image: UploadFile = File(...)) -> dict[str, object]:
+    """Temporary diagnostic endpoint executing ONLY: decode -> preprocess -> tensor -> model forward pass (NO Grad-CAM)."""
+    start_time = time.perf_counter()
+    rss_start = get_process_rss_mb()
+    logger.info(f"[DEBUG_INFERENCE] request received | filename={image.filename} | rss_mb={rss_start}MB")
+    sys.stdout.flush()
+
+    if model is None:
+        raise HTTPException(status_code=503, detail="No model loaded.")
+
+    contents = await image.read(MAX_IMAGE_BYTES + 1)
+    if len(contents) == 0 or len(contents) > MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=400, detail="Invalid file size.")
+
+    with Image.open(io.BytesIO(contents)) as uploaded:
+        rgb_image = uploaded.convert("RGB")
+
+    from backend.netv2_reconstruction import MatlabNetV2Reconstructed
+
+    if isinstance(model, MatlabNetV2Reconstructed):
+        resized_image = rgb_image.resize((224, 224), resample=Image.Resampling.BILINEAR)
+        image_tensor = model.preprocess_image(np.array(resized_image)).to(DEVICE)
+    else:
+        padded_image = pad_to_square(rgb_image)
+        image_tensor = transform(padded_image).unsqueeze(0).to(DEVICE)
+
+    rss_before_inf = get_process_rss_mb()
+    logger.info(f"[DEBUG_INFERENCE] before model forward pass | tensor_shape={list(image_tensor.shape)} | dtype={image_tensor.dtype} | rss_mb={rss_before_inf}MB")
+    sys.stdout.flush()
+
+    inf_start = time.perf_counter()
+    with torch.inference_mode():
+        logits = model(image_tensor)
+        probs = torch.softmax(logits, dim=1)[0].cpu().tolist()
+
+    inf_ms = round((time.perf_counter() - inf_start) * 1000, 2)
+    grade = int(max(range(len(probs)), key=probs.__getitem__))
+    rss_after_inf = get_process_rss_mb()
+
+    logger.info(f"[DEBUG_INFERENCE] model forward pass complete | grade={grade} | confidence={probs[grade]:.4f} | latency={inf_ms}ms | rss_mb={rss_after_inf}MB")
+    sys.stdout.flush()
+
+    return {
+        "status": "ok",
+        "predicted_grade": grade,
+        "confidence": round(probs[grade], 4),
+        "probabilities": {str(i): round(p, 4) for i, p in enumerate(probs)},
+        "input_shape": list(image_tensor.shape),
+        "input_dtype": str(image_tensor.dtype),
+        "device": str(DEVICE),
+        "inference_latency_ms": inf_ms,
+        "total_latency_ms": round((time.perf_counter() - start_time) * 1000, 2),
+        "rss_before_inf_mb": rss_before_inf,
+        "rss_after_inf_mb": rss_after_inf,
+        "model_class": type(model).__name__,
+    }
+
+
+@app.post("/debug/gradcam")
+async def debug_gradcam(image: UploadFile = File(...)) -> dict[str, object]:
+    """Temporary diagnostic endpoint executing ONLY: decode -> preprocess -> tensor -> model forward pass -> Grad-CAM."""
+    start_time = time.perf_counter()
+    rss_start = get_process_rss_mb()
+    logger.info(f"[DEBUG_GRADCAM] request received | filename={image.filename} | rss_mb={rss_start}MB")
+    sys.stdout.flush()
+
+    if model is None:
+        raise HTTPException(status_code=503, detail="No model loaded.")
+
+    contents = await image.read(MAX_IMAGE_BYTES + 1)
+    if len(contents) == 0 or len(contents) > MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=400, detail="Invalid file size.")
+
+    with Image.open(io.BytesIO(contents)) as uploaded:
+        rgb_image = uploaded.convert("RGB")
+
+    from backend.netv2_reconstruction import MatlabNetV2Reconstructed
+
+    if isinstance(model, MatlabNetV2Reconstructed):
+        resized_image = rgb_image.resize((224, 224), resample=Image.Resampling.BILINEAR)
+        image_tensor = model.preprocess_image(np.array(resized_image)).to(DEVICE)
+    else:
+        padded_image = pad_to_square(rgb_image)
+        image_tensor = transform(padded_image).unsqueeze(0).to(DEVICE)
+
+    with torch.inference_mode():
+        logits = model(image_tensor)
+        probs = torch.softmax(logits, dim=1)[0].cpu().tolist()
+
+    grade = int(max(range(len(probs)), key=probs.__getitem__))
+
+    rss_before_cam = get_process_rss_mb()
+    logger.info(f"[DEBUG_GRADCAM] before gradcam | grade={grade} | rss_mb={rss_before_cam}MB")
+    sys.stdout.flush()
+
+    cam_b64, cam_ms = generate_gradcam(model, image_tensor, grade)
+    rss_after_cam = get_process_rss_mb()
+
+    logger.info(f"[DEBUG_GRADCAM] gradcam complete | heatmap_len={len(cam_b64)} | latency={cam_ms}ms | rss_mb={rss_after_cam}MB")
+    sys.stdout.flush()
+
+    return {
+        "status": "ok",
+        "predicted_grade": grade,
+        "gradcam_latency_ms": cam_ms,
+        "heatmap_len": len(cam_b64),
+        "total_latency_ms": round((time.perf_counter() - start_time) * 1000, 2),
+        "rss_before_cam_mb": rss_before_cam,
+        "rss_after_cam_mb": rss_after_cam,
     }
 
 
@@ -317,7 +466,8 @@ async def predict(image: UploadFile = File(...)) -> dict[str, object]:
     stage = "request_received"
 
     try:
-        logger.info(f"[PREDICT] stage=request_received | filename={image.filename} | content_type={image.content_type}")
+        rss_req = get_process_rss_mb()
+        logger.info(f"[PREDICT] stage=request_received | filename={image.filename} | content_type={image.content_type} | rss_mb={rss_req}MB")
         sys.stdout.flush()
 
         if model is None:
@@ -346,7 +496,8 @@ async def predict(image: UploadFile = File(...)) -> dict[str, object]:
             raise HTTPException(status_code=400, detail="The uploaded file is not a valid image.") from error
 
         orig_w, orig_h = rgb_image.size
-        logger.info(f"[PREDICT] stage=image_decoded | mode={rgb_image.mode} | dimensions={orig_w}x{orig_h} | bytes={len(contents)}")
+        rss_decoded = get_process_rss_mb()
+        logger.info(f"[PREDICT] stage=image_decoded | mode={rgb_image.mode} | dimensions={orig_w}x{orig_h} | bytes={len(contents)} | rss_mb={rss_decoded}MB")
         sys.stdout.flush()
 
         # Stage 2: validation_start / validation_complete
@@ -360,14 +511,16 @@ async def predict(image: UploadFile = File(...)) -> dict[str, object]:
             raise HTTPException(status_code=400, detail=error_reason)
 
         stage = "validation_complete"
-        logger.info("[PREDICT] stage=validation_complete")
+        rss_val = get_process_rss_mb()
+        logger.info(f"[PREDICT] stage=validation_complete | rss_mb={rss_val}MB")
         sys.stdout.flush()
 
         from backend.netv2_reconstruction import MatlabNetV2Reconstructed
 
         # Stage 3: preprocess_start / preprocess_complete
         stage = "preprocess_start"
-        logger.info(f"[PREDICT] stage=preprocess_start | mem_before_mb={get_memory_usage_mb():.2f}MB")
+        rss_prep_start = get_process_rss_mb()
+        logger.info(f"[PREDICT] stage=preprocess_start | rss_mb={rss_prep_start}MB")
         sys.stdout.flush()
 
         if isinstance(model, MatlabNetV2Reconstructed):
@@ -387,23 +540,27 @@ async def predict(image: UploadFile = File(...)) -> dict[str, object]:
             logger.info("[PREDICT] stage=tensor_conversion_start")
             sys.stdout.flush()
             image_tensor = model.preprocess_image(arr_224).to(DEVICE)
-            logger.info(f"[PREDICT] stage=tensor_conversion_complete | tensor_shape={list(image_tensor.shape)} | dtype={image_tensor.dtype} | device={image_tensor.device}")
+            rss_tensor = get_process_rss_mb()
+            logger.info(f"[PREDICT] stage=tensor_conversion_complete | tensor_shape={list(image_tensor.shape)} | dtype={image_tensor.dtype} | device={image_tensor.device} | rss_mb={rss_tensor}MB")
             sys.stdout.flush()
         else:
             padded_image = pad_to_square(rgb_image)
             image_tensor = transform(padded_image).unsqueeze(0).to(DEVICE)
 
         stage = "preprocess_complete"
-        logger.info(f"[PREDICT] stage=preprocess_complete | mem_after_mb={get_memory_usage_mb():.2f}MB")
+        rss_prep_complete = get_process_rss_mb()
+        logger.info(f"[PREDICT] stage=preprocess_complete | rss_mb={rss_prep_complete}MB")
         sys.stdout.flush()
 
         # Stage 4: model_inference_start / model_inference_complete
         stage = "model_inference_start"
-        logger.info(f"[PREDICT] stage=model_inference_start | model={type(model).__name__}")
+        diag = get_model_diagnostics(model, image_tensor)
+        rss_before_inf = get_process_rss_mb()
+        logger.info(f"[PREDICT] stage=before_model_inference | diagnostics={diag} | rss_mb={rss_before_inf}MB")
         sys.stdout.flush()
 
         inf_start = time.perf_counter()
-        with torch.no_grad():
+        with torch.inference_mode():
             p_orig = torch.softmax(model(image_tensor), dim=1)
             if isinstance(model, MatlabNetV2Reconstructed):
                 probs_tensor = p_orig
@@ -415,18 +572,21 @@ async def predict(image: UploadFile = File(...)) -> dict[str, object]:
         grade = int(max(range(len(probabilities)), key=probabilities.__getitem__))
 
         stage = "model_inference_complete"
-        logger.info(f"[PREDICT] stage=model_inference_complete | grade={grade} | confidence={probabilities[grade]:.4f} | latency={inf_ms}ms")
+        rss_after_inf = get_process_rss_mb()
+        logger.info(f"[PREDICT] stage=after_model_inference | grade={grade} | confidence={probabilities[grade]:.4f} | latency={inf_ms}ms | rss_mb={rss_after_inf}MB")
         sys.stdout.flush()
 
         # Stage 5: gradcam_start / gradcam_complete
         stage = "gradcam_start"
-        logger.info("[PREDICT] stage=gradcam_start")
+        rss_before_cam = get_process_rss_mb()
+        logger.info(f"[PREDICT] stage=before_gradcam | rss_mb={rss_before_cam}MB")
         sys.stdout.flush()
 
         heatmap_b64, gradcam_ms = generate_gradcam(model, image_tensor, grade)
 
         stage = "gradcam_complete"
-        logger.info(f"[PREDICT] stage=gradcam_complete | heatmap_len={len(heatmap_b64)} | latency={gradcam_ms}ms")
+        rss_after_cam = get_process_rss_mb()
+        logger.info(f"[PREDICT] stage=after_gradcam | heatmap_len={len(heatmap_b64)} | latency={gradcam_ms}ms | rss_mb={rss_after_cam}MB")
         sys.stdout.flush()
 
         # Stage 6: response_build_start / response_build_complete
@@ -473,7 +633,7 @@ async def predict(image: UploadFile = File(...)) -> dict[str, object]:
 # Mount compiled React assets and SPA fallback
 @app.get("/{full_path:path}")
 async def serve_spa(full_path: str):
-    if full_path in {"health", "predict"}:
+    if full_path in {"health", "predict", "debug/inference", "debug/gradcam"}:
         raise HTTPException(status_code=404, detail="Not found")
     target_file = DIST_DIR / full_path
     if target_file.is_file():
