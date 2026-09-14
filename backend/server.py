@@ -52,6 +52,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("drishtimitra")
 
+app = FastAPI(title="DrishtiMitra experimental inference API", version="0.2.0")
+
 cors_origins_value = os.getenv("CORS_ALLOWED_ORIGINS", "*")
 cors_allowed_origins = [origin.strip() for origin in cors_origins_value.split(",") if origin.strip()]
 if not cors_allowed_origins:
