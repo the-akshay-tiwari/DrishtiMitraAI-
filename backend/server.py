@@ -199,42 +199,74 @@ def generate_gradcam(
     image_tensor: torch.Tensor,
     target_class: int,
 ) -> tuple[str, float]:
-    """Computes Gradient-Weighted Class Activation Mapping (Grad-CAM) for target class."""
+    """Computes Gradient-Weighted Class Activation Mapping (Grad-CAM) using memory-optimized detached features."""
     cam_start = time.perf_counter()
-    if hasattr(target_model, "head_conv"):
-        target_layer = target_model.head_conv.conv
-    elif hasattr(target_model, "features"):
-        target_layer = target_model.features[-1]
-    else:
-        target_layer = list(target_model.children())[-2]
-
-    activations: list[torch.Tensor] = []
-    gradients: list[torch.Tensor] = []
-
-    def forward_hook(module, input, output):
-        activations.append(output)
-
-    def backward_hook(module, grad_in, grad_out):
-        if grad_out and len(grad_out) > 0 and grad_out[0] is not None:
-            gradients.append(grad_out[0])
-
-    h1 = target_layer.register_forward_hook(forward_hook)
-    h2 = target_layer.register_full_backward_hook(backward_hook)
+    from backend.netv2_reconstruction import MatlabNetV2Reconstructed
 
     try:
-        with torch.enable_grad():
-            input_var = image_tensor.clone().detach().requires_grad_(True)
-            target_model.zero_grad()
-            logits = target_model(input_var)
-            score = logits[0, target_class]
-            score.backward()
+        if isinstance(target_model, MatlabNetV2Reconstructed):
+            with torch.inference_mode():
+                x = target_model.stem_conv(image_tensor)
+                x = target_model.stem_bn(x)
+                x = target_model.stem_swish(x)
 
-        if not activations or not gradients:
-            logger.warning("[GRAD-CAM] No activations or gradients captured.")
+                x = target_model.b0_dw(x)
+                x = target_model.b0_bn0(x)
+                x = target_model.b0_swish0(x)
+                se = F.adaptive_avg_pool2d(x, (1, 1))
+                se = target_model.b0_se_conv1(se)
+                se = target_model.b0_se_swish(se)
+                se = target_model.b0_se_conv2(se)
+                se = torch.sigmoid(se)
+                x = x * se
+                x = target_model.b0_pw(x)
+                x = target_model.b0_bn1(x)
+
+                for block, use_skip in zip(target_model.blocks, target_model.block_skips):
+                    x = target_model.forward_mbblock(x, block, use_skip)
+
+                feat = target_model.head_conv(x)
+
+            act_var = feat.clone().detach().requires_grad_(True)
+
+            with torch.enable_grad():
+                target_model.zero_grad()
+                x_head = target_model.head_bn(act_var)
+                x_head = target_model.head_swish(x_head)
+                x_head = target_model.head_gap(x_head)
+                flat = torch.flatten(x_head, 1)
+                logits = target_model.dr_head(flat)
+
+                score = logits[0, target_class]
+                score.backward()
+
+            act = act_var.detach()
+            grad = act_var.grad.detach()
+
+        elif hasattr(target_model, "features") and hasattr(target_model, "avgpool") and hasattr(target_model, "classifier"):
+            with torch.inference_mode():
+                feat = target_model.features(image_tensor)
+
+            act_var = feat.clone().detach().requires_grad_(True)
+
+            with torch.enable_grad():
+                target_model.zero_grad()
+                x_head = target_model.avgpool(act_var)
+                flat = torch.flatten(x_head, 1)
+                logits = target_model.classifier(flat)
+
+                score = logits[0, target_class]
+                score.backward()
+
+            act = act_var.detach()
+            grad = act_var.grad.detach()
+        else:
+            logger.warning("[GRAD-CAM] Unsupported model structure for memory-optimized Grad-CAM.")
             return "", round((time.perf_counter() - cam_start) * 1000, 2)
 
-        act = activations[0]
-        grad = gradients[0]
+        if act is None or grad is None:
+            logger.warning("[GRAD-CAM] No activations or gradients captured.")
+            return "", round((time.perf_counter() - cam_start) * 1000, 2)
 
         weights = torch.mean(grad, dim=(2, 3), keepdim=True)
         cam = torch.sum(weights * act, dim=1, keepdim=True)
@@ -254,7 +286,7 @@ def generate_gradcam(
         rgba[:, :, 2] = np.clip(255 - cam_np.astype(np.float32) * 2.0, 0, 255).astype(np.uint8)
         rgba[:, :, 3] = np.clip(cam_np.astype(np.float32) * 0.75, 0, 200).astype(np.uint8)
 
-        overlay_img = Image.fromarray(rgba, mode="RGBA")
+        overlay_img = Image.fromarray(rgba)
         buffer = io.BytesIO()
         overlay_img.save(buffer, format="PNG")
         b64_str = base64.b64encode(buffer.getvalue()).decode("utf-8")
@@ -266,8 +298,6 @@ def generate_gradcam(
         cam_ms = round((time.perf_counter() - cam_start) * 1000, 2)
         return "", cam_ms
     finally:
-        h1.remove()
-        h2.remove()
         target_model.zero_grad()
 
 
