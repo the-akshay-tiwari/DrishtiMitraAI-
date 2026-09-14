@@ -490,13 +490,10 @@ async def predict(image: UploadFile = File(...)) -> dict[str, object]:
         stage = "image_decoded"
         try:
             with Image.open(io.BytesIO(contents)) as uploaded:
-                full_rgb = uploaded.convert("RGB")
-                orig_w, orig_h = full_rgb.size
+                rgb_image = uploaded.convert("RGB")
+                orig_w, orig_h = rgb_image.size
                 if orig_w > 1024 or orig_h > 1024:
-                    rgb_image = full_rgb.copy()
                     rgb_image.thumbnail((1024, 1024), Image.Resampling.BILINEAR)
-                else:
-                    rgb_image = full_rgb
         except (UnidentifiedImageError, OSError) as error:
             logger.warning(f"[PREDICT][WARN] Failed to decode image: {error}")
             raise HTTPException(status_code=400, detail="The uploaded file is not a valid image.") from error
