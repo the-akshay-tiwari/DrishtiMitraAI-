@@ -134,15 +134,18 @@ def pad_to_square(image: Image.Image, bg_color: tuple[int, int, int] = (0, 0, 0)
 
 
 def validate_retina_image(image: Image.Image) -> tuple[bool, str]:
-    """Validate whether an image is a valid, clear fundus retina image."""
+    """Validate whether an image is a valid, clear fundus retina image (Memory-Optimized)."""
+    import gc
+
     w, h = image.size
     rss_val_start = get_process_rss_mb()
     logger.info(f"[PREDICT] stage=validation_downsample_start | orig_dimensions={w}x{h} | rss_mb={rss_val_start}MB")
     sys.stdout.flush()
 
     if w > 1024 or h > 1024:
-        val_img = image.copy()
-        val_img.thumbnail((1024, 1024), Image.Resampling.BILINEAR)
+        ratio = min(1024.0 / w, 1024.0 / h)
+        val_w, val_h = max(1, int(w * ratio)), max(1, int(h * ratio))
+        val_img = image.resize((val_w, val_h), resample=Image.Resampling.BILINEAR)
     else:
         val_img = image
 
@@ -150,15 +153,27 @@ def validate_retina_image(image: Image.Image) -> tuple[bool, str]:
     sys.stdout.flush()
 
     img_np = np.array(val_img.convert("RGB"))
-    h, w, _ = img_np.shape
+    val_h, val_w, _ = img_np.shape
 
-    if h < 64 or w < 64:
+    if val_h < 64 or val_w < 64:
+        del img_np
+        if val_img is not image:
+            del val_img
+        gc.collect()
         return False, "Image resolution is too low. Please upload a clear fundus image."
 
     mean_intensity = float(np.mean(img_np))
     if mean_intensity < 10.0:
+        del img_np
+        if val_img is not image:
+            del val_img
+        gc.collect()
         return False, "Uploaded image is too dark or empty. Please upload an illuminated fundus retina image."
     if mean_intensity > 240.0:
+        del img_np
+        if val_img is not image:
+            del val_img
+        gc.collect()
         return False, "Uploaded image is overexposed. Please upload a clear fundus retina image."
 
     r_mean = float(np.mean(img_np[:, :, 0]))
@@ -166,21 +181,30 @@ def validate_retina_image(image: Image.Image) -> tuple[bool, str]:
     b_mean = float(np.mean(img_np[:, :, 2]))
 
     if r_mean < b_mean * 1.05 and r_mean < 40.0:
+        del img_np
+        if val_img is not image:
+            del val_img
+        gc.collect()
         return False, "The uploaded image does not appear to be a retinal fundus image. Please upload a valid retina scan."
 
-    center_h_start, center_h_end = int(h * 0.2), int(h * 0.8)
-    center_w_start, center_w_end = int(w * 0.2), int(w * 0.8)
+    center_h_start, center_h_end = int(val_h * 0.2), int(val_h * 0.8)
+    center_w_start, center_w_end = int(val_w * 0.2), int(val_w * 0.8)
     center_crop = img_np[center_h_start:center_h_end, center_w_start:center_w_end]
 
     center_r = float(np.mean(center_crop[:, :, 0]))
     center_b = float(np.mean(center_crop[:, :, 2]))
 
     if center_r < center_b * 1.08 and center_r < 35.0:
+        del img_np, center_crop
+        if val_img is not image:
+            del val_img
+        gc.collect()
         return False, "The image does not match the color profile of a retinal fundus scan. Please upload a valid retina image."
 
     logger.info("[PREDICT] stage=validation_blur_check_start")
     sys.stdout.flush()
     gray = np.mean(img_np, axis=2).astype(np.float32)
+    blur_pass = True
     if gray.shape[0] > 10 and gray.shape[1] > 10:
         laplacian = (
             gray[2:, 1:-1] + gray[:-2, 1:-1] + gray[1:-1, 2:] + gray[1:-1, :-2] - 4 * gray[1:-1, 1:-1]
@@ -188,8 +212,17 @@ def validate_retina_image(image: Image.Image) -> tuple[bool, str]:
         blur_variance = float(np.var(laplacian))
         logger.info(f"[PREDICT] stage=validation_blur_check_complete | blur_variance={blur_variance:.2f}")
         sys.stdout.flush()
+        del laplacian
         if blur_variance < 5.0:
-            return False, "Image is too blurry or out of focus to perform diabetic retinopathy screening. Please upload a clearer capture."
+            blur_pass = False
+
+    del gray, center_crop, img_np
+    if val_img is not image:
+        del val_img
+    gc.collect()
+
+    if not blur_pass:
+        return False, "Image is too blurry or out of focus to perform diabetic retinopathy screening. Please upload a clearer capture."
 
     return True, ""
 
