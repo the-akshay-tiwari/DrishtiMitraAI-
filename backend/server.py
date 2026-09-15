@@ -528,15 +528,13 @@ async def predict(image: UploadFile = File(...)) -> dict[str, object]:
             with Image.open(io.BytesIO(contents)) as uploaded:
                 rgb_image = uploaded.convert("RGB")
                 orig_w, orig_h = rgb_image.size
-                if orig_w > 1024 or orig_h > 1024:
-                    rgb_image.thumbnail((1024, 1024), Image.Resampling.BILINEAR)
         except (UnidentifiedImageError, OSError) as error:
             logger.warning(f"[PREDICT][WARN] Failed to decode image: {error}")
             raise HTTPException(status_code=400, detail="The uploaded file is not a valid image.") from error
 
         del contents
         rss_resized = get_process_rss_mb()
-        logger.info(f"[PREDICT] stage=image_resized | orig_dimensions={orig_w}x{orig_h} | working_dimensions={rgb_image.size} | rss_mb={rss_resized}MB")
+        logger.info(f"[PREDICT] stage=image_decoded | orig_dimensions={orig_w}x{orig_h} | rss_mb={rss_resized}MB")
         sys.stdout.flush()
 
         # Stage 2: validation_start / validation_complete
