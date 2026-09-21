@@ -16,13 +16,15 @@ type Page = 'dashboard' | 'workflow' | 'history' | 'report' | 'review' | 'settin
 type ModelPrediction = ModelPredictionInfo
 
 
-const navItems: Array<{ id: Page; label: string; glyph: string }> = [
-  { id: 'dashboard', label: 'Dashboard', glyph: 'âŒ‚' },
-  { id: 'workflow', label: 'New Screening', glyph: 'âŠ•' },
-  { id: 'history', label: 'Patient History', glyph: 'â–¤' },
-  { id: 'report', label: 'Screening Report', glyph: 'â–§' },
-  { id: 'review', label: 'Specialist Review', glyph: 'â—‰' },
-  { id: 'settings', label: 'System Status', glyph: 'âš™' },
+type IconName = 'activity' | 'arrow-right' | 'arrow-up-right' | 'calendar' | 'clock' | 'eye' | 'file-text' | 'history' | 'home' | 'plus-circle' | 'settings' | 'shield-check' | 'swap'
+
+const navItems: Array<{ id: Page; label: string; icon: IconName }> = [
+  { id: 'dashboard', label: 'Dashboard', icon: 'home' },
+  { id: 'workflow', label: 'New Screening', icon: 'plus-circle' },
+  { id: 'history', label: 'Patient History', icon: 'history' },
+  { id: 'report', label: 'Screening Report', icon: 'file-text' },
+  { id: 'review', label: 'Specialist Review', icon: 'eye' },
+  { id: 'settings', label: 'System Status', icon: 'settings' },
 ]
 
 const newPatient = (): Patient => ({
@@ -177,14 +179,14 @@ function App() {
       <aside className="fixed inset-y-0 left-0 z-20 hidden w-[252px] flex-col border-r border-slate-200 bg-white px-4 py-5 lg:flex">
         <Brand />
         <nav className="mt-9 space-y-1" aria-label="Main navigation">
-          {navItems.map((item) => <button key={item.id} onClick={() => switchPage(item.id)} className={`nav-link ${page === item.id ? 'nav-link-active' : ''}`}><span className="grid h-7 w-7 place-items-center text-base">{item.glyph}</span>{item.label}</button>)}
+          {navItems.map((item) => <button key={item.id} onClick={() => switchPage(item.id)} className={`nav-link ${page === item.id ? 'nav-link-active' : ''}`}><Icon name={item.icon} className="h-5 w-5 shrink-0" />{item.label}</button>)}
         </nav>
         <div className="mt-auto rounded-2xl border border-teal-100 bg-gradient-to-br from-teal-50 to-cyan-50 p-4">
           <p className="text-xs font-bold uppercase tracking-[0.14em] text-teal-700">Safety principle</p>
-          <p className="mt-2 text-sm font-semibold leading-5 text-slate-800">AI-assisted screening â€” not autonomous diagnosis.</p>
+          <p className="mt-2 text-sm font-semibold leading-5 text-slate-800">AI-assisted screening — not autonomous diagnosis.</p>
           <p className="mt-2 text-xs leading-5 text-slate-600">Human review and ophthalmologist sign-off remain essential.</p>
         </div>
-        <p className="mt-4 px-2 text-[11px] font-medium text-slate-400">Prototype Demonstration Â· SIH26038</p>
+        <p className="mt-4 px-2 text-[11px] font-medium text-slate-400">Prototype Demonstration · SIH26038</p>
       </aside>
 
       <main className="lg:pl-[252px]">
@@ -207,7 +209,7 @@ function App() {
 }
 
 function Brand({ compact = false }: { compact?: boolean }) {
-  return <div className="flex min-w-0 items-center gap-3"><div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-teal-700 text-xl text-white shadow-lg shadow-teal-700/20">â—‰</div><div className={compact ? 'hidden sm:block' : ''}><p className="text-lg font-black tracking-tight text-slate-950">Drishti<span className="text-teal-700">Mitra</span></p><p className="-mt-0.5 text-[10px] font-extrabold uppercase tracking-[0.18em] text-slate-500">Retina-XAI</p></div></div>
+  return <div className="flex min-w-0 items-center gap-3"><div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-teal-700 text-white shadow-lg shadow-teal-700/20"><Icon name="eye" className="h-6 w-6" /></div><div className={compact ? 'hidden sm:block' : ''}><p className="text-lg font-black tracking-tight text-slate-950">Drishti<span className="text-teal-700">Mitra</span></p><p className="-mt-0.5 text-[10px] font-extrabold uppercase tracking-[0.18em] text-slate-500">Retina-XAI</p></div></div>
 }
 
 function Dashboard({ patients, online, onNew, onHistory, onOpen }: { patients: Patient[]; online: boolean; onNew: () => void; onHistory: () => void; onOpen: (patient: Patient) => void }) {
@@ -216,29 +218,49 @@ function Dashboard({ patients, online, onNew, onHistory, onOpen }: { patients: P
   return <>
     <section className="flex flex-col justify-between gap-6 rounded-3xl bg-slate-950 px-6 py-7 text-white shadow-xl shadow-slate-900/10 md:flex-row md:items-end lg:px-8">
       <div className="max-w-2xl"><p className="text-xs font-bold uppercase tracking-[0.18em] text-teal-300">Good morning, Anjali</p><h1 className="mt-2 text-3xl font-black tracking-tight md:text-4xl">Screen patients with clarity.<br /><span className="text-teal-300">Escalate with context.</span></h1><p className="mt-4 max-w-xl text-sm leading-6 text-slate-300">A guided rural point-of-care workflow for diabetic-retinopathy screening support, visual evidence, and specialist review.</p></div>
-      <div className="flex flex-wrap gap-3"><button onClick={onNew} className="btn-light">ï¼‹ New Screening</button><button onClick={onHistory} className="btn-dark-outline">Patient History</button></div>
+      <div className="flex flex-wrap gap-3"><button onClick={onNew} className="btn-light inline-flex items-center gap-2"><Icon name="plus-circle" className="h-5 w-5" />New Screening</button><button onClick={onHistory} className="btn-dark-outline">Patient History</button></div>
     </section>
     <section className="mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-      <Stat title="Today's screenings" value="12" note="3 completed today" glyph="â–£" tone="teal" />
-      <Stat title="Pending reviews" value={String(pending)} note="Ophthalmologist queue" glyph="â—‰" tone="amber" />
-      <Stat title="Referral cases" value={String(referrals)} note="Priority referrals" glyph="â†—" tone="rose" />
+      <Stat title="Today's screenings" value="12" note="3 completed today" icon="calendar" tone="teal" />
+      <Stat title="Pending reviews" value={String(pending)} note="Ophthalmologist queue" icon="clock" tone="amber" />
+      <Stat title="Referral cases" value={String(referrals)} note="Priority referrals" icon="arrow-up-right" tone="rose" />
       <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><p className="text-sm font-semibold text-slate-600">System status</p><div className="mt-4"><OfflineStatus online={online} compact /></div><p className="mt-4 text-xs leading-5 text-slate-500">{online ? 'Cloud sync available. Prototype workflow remains local.' : 'Local screening and storage available. Pending items sync when connected.'}</p></div>
     </section>
     <section className="mt-8 grid gap-6 xl:grid-cols-[1.05fr_.95fr]">
-      <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs font-bold uppercase tracking-[0.14em] text-slate-500">Todayâ€™s queue</p><h2 className="mt-1 text-xl font-bold text-slate-950">Recent patients</h2></div><button onClick={onHistory} className="text-sm font-bold text-teal-700 hover:text-teal-800">View history â†’</button></div><div className="mt-5 grid gap-3 md:grid-cols-2">{patients.slice(0, 4).map((patient) => <PatientCard key={patient.id} patient={patient} onOpen={() => onOpen(patient)} />)}</div></div>
-      <div className="rounded-2xl border border-teal-100 bg-white p-5 shadow-sm"><p className="text-xs font-bold uppercase tracking-[0.14em] text-teal-700">Guided care pathway</p><h2 className="mt-1 text-xl font-bold text-slate-950">Capture â†’ Analyze â†’ Explain â†’ Refer</h2><div className="mt-5 space-y-0">{[['1', 'Capture', 'Select a supplied IDRiD demonstration image or upload an image.'], ['2', 'Analyze', 'Quality-gated deterministic prototype screening & grading.'], ['3', 'Explain', 'Review Grad-CAM attention and lesion visual evidence.'], ['4', 'Refer', 'Generate a FHIR/ABDM-ready report and refer for sign-off.']].map(([number, title, copy], index) => <div className="relative flex gap-4 pb-5 last:pb-0" key={title}>{index < 3 && <span className="absolute left-4 top-9 h-[calc(100%-22px)] w-px bg-teal-100" />}<span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-teal-700 text-xs font-black text-white">{number}</span><div><p className="font-bold text-slate-900">{title}</p><p className="mt-0.5 text-sm leading-5 text-slate-600">{copy}</p></div></div>)}</div></div>
+      <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs font-bold uppercase tracking-[0.14em] text-slate-500">Today's queue</p><h2 className="mt-1 text-xl font-bold text-slate-950">Recent patients</h2></div><button onClick={onHistory} className="inline-flex items-center gap-1 text-sm font-bold text-teal-700 hover:text-teal-800">View history <Icon name="arrow-right" className="h-4 w-4" /></button></div><div className="mt-5 grid gap-3 md:grid-cols-2">{patients.slice(0, 4).map((patient) => <PatientCard key={patient.id} patient={patient} onOpen={() => onOpen(patient)} />)}</div></div>
+      <div className="rounded-2xl border border-teal-100 bg-white p-5 shadow-sm"><p className="text-xs font-bold uppercase tracking-[0.14em] text-teal-700">Guided care pathway</p><h2 className="mt-1 flex flex-wrap items-center gap-2 text-xl font-bold text-slate-950"><span>Capture</span><Icon name="arrow-right" className="h-4 w-4 text-teal-600" /><span>Analyze</span><Icon name="arrow-right" className="h-4 w-4 text-teal-600" /><span>Explain</span><Icon name="arrow-right" className="h-4 w-4 text-teal-600" /><span>Refer</span></h2><div className="mt-5 space-y-0">{[['1', 'Capture', 'Select a supplied IDRiD demonstration image or upload an image.'], ['2', 'Analyze', 'Quality-gated deterministic prototype screening & grading.'], ['3', 'Explain', 'Review Grad-CAM attention and lesion visual evidence.'], ['4', 'Refer', 'Generate a FHIR/ABDM-ready report and refer for sign-off.']].map(([number, title, copy], index) => <div className="relative flex gap-4 pb-5 last:pb-0" key={title}>{index < 3 && <span className="absolute left-4 top-9 h-[calc(100%-22px)] w-px bg-teal-100" />}<span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-teal-700 text-xs font-black text-white">{number}</span><div><p className="font-bold text-slate-900">{title}</p><p className="mt-0.5 text-sm leading-5 text-slate-600">{copy}</p></div></div>)}</div></div>
     </section>
-    <section className="mt-6 grid gap-4 md:grid-cols-3"><InfoPanel title="Image-quality gate" icon="âœ“" text="Guide recapture before any screening workflow continues." /><InfoPanel title="Human-in-the-loop" icon="â—Œ" text="Visual evidence supportsâ€”not replacesâ€”clinical review." /><InfoPanel title="FHIR / ABDM-ready" icon="â‡„" text="Prototype records are structured for future interoperability." /></section>
+    <section className="mt-6 grid gap-4 md:grid-cols-3"><InfoPanel title="Image-quality gate" icon="shield-check" text="Guide recapture before any screening workflow continues." /><InfoPanel title="Human-in-the-loop" icon="eye" text="Visual evidence supports—not replaces—clinical review." /><InfoPanel title="FHIR / ABDM-ready" icon="swap" text="Prototype records are structured for future interoperability." /></section>
   </>
 }
 
-function Stat({ title, value, note, glyph, tone }: { title: string; value: string; note: string; glyph: string; tone: 'teal' | 'amber' | 'rose' }) {
+function Stat({ title, value, note, icon, tone }: { title: string; value: string; note: string; icon: IconName; tone: 'teal' | 'amber' | 'rose' }) {
   const style = tone === 'teal' ? 'bg-teal-50 text-teal-700' : tone === 'amber' ? 'bg-amber-50 text-amber-700' : 'bg-rose-50 text-rose-700'
-  return <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex items-start justify-between"><p className="text-sm font-semibold text-slate-600">{title}</p><span className={`grid h-9 w-9 place-items-center rounded-xl text-lg ${style}`}>{glyph}</span></div><p className="mt-4 text-3xl font-black tracking-tight text-slate-950">{value}</p><p className="mt-1 text-xs text-slate-500">{note}</p></div>
+  return <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"><div className="flex items-start justify-between"><p className="text-sm font-semibold text-slate-600">{title}</p><span className={`grid h-9 w-9 place-items-center rounded-xl ${style}`}><Icon name={icon} className="h-5 w-5" /></span></div><p className="mt-4 text-3xl font-black tracking-tight text-slate-950">{value}</p><p className="mt-1 text-xs text-slate-500">{note}</p></div>
 }
 
-function InfoPanel({ title, icon, text }: { title: string; icon: string; text: string }) {
-  return <div className="flex gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"><span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-slate-100 font-bold text-slate-700">{icon}</span><div><p className="font-bold text-slate-900">{title}</p><p className="mt-1 text-sm leading-5 text-slate-600">{text}</p></div></div>
+function InfoPanel({ title, icon, text }: { title: string; icon: IconName; text: string }) {
+  return <div className="flex gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm"><span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-slate-100 font-bold text-slate-700"><Icon name={icon} className="h-5 w-5" /></span><div><p className="font-bold text-slate-900">{title}</p><p className="mt-1 text-sm leading-5 text-slate-600">{text}</p></div></div>
+}
+
+function Icon({ name, className = '' }: { name: IconName; className?: string }) {
+  const common = { fill: 'none', stroke: 'currentColor', strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const, strokeWidth: 2 }
+  const paths: Record<IconName, React.ReactNode> = {
+    activity: <><path d="M3 12h4l2-7 4 14 2-7h6" /></>,
+    'arrow-right': <><path d="M5 12h14" /><path d="m13 6 6 6-6 6" /></>,
+    'arrow-up-right': <><path d="M7 17 17 7" /><path d="M8 7h9v9" /></>,
+    calendar: <><rect x="3" y="5" width="18" height="16" rx="2" /><path d="M16 3v4M8 3v4M3 10h18" /></>,
+    clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>,
+    eye: <><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z" /><circle cx="12" cy="12" r="2.5" /></>,
+    'file-text': <><path d="M6 3h8l4 4v14H6z" /><path d="M14 3v5h5M9 13h6M9 17h6" /></>,
+    history: <><path d="M3 12a9 9 0 1 0 3-6.7" /><path d="M3 4v5h5M12 7v5l3 2" /></>,
+    home: <><path d="m3 11 9-8 9 8" /><path d="M5 10v10h14V10M9 20v-6h6v6" /></>,
+    'plus-circle': <><circle cx="12" cy="12" r="9" /><path d="M12 8v8M8 12h8" /></>,
+    settings: <><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.1 2.1-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5v.2h-3v-.2a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1-2.1-2.1.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H5v-3h.2a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1 2.1-2.1.1.1a1.7 1.7 0 0 0 1.9.3 1.7 1.7 0 0 0 1-1.5V4h3v.2a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1 2.1 2.1-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.5 1h.2v3h-.2a1.7 1.7 0 0 0-1.5 1Z" /></>,
+    'shield-check': <><path d="M12 3 20 6v5c0 5-3.4 8.6-8 10-4.6-1.4-8-5-8-10V6z" /><path d="m8.5 12 2.2 2.2 4.8-4.8" /></>,
+    swap: <><path d="M7 7h11l-3-3M17 17H6l3 3M18 7l3 3-3 3M6 17l-3-3 3-3" /></>,
+  }
+  return <svg viewBox="0 0 24 24" className={className} aria-hidden="true" {...common}>{paths[name]}</svg>
 }
 
 type WorkflowProps = {
@@ -304,7 +326,7 @@ function History({ patients, onOpen }: { patients: Patient[]; onOpen: (patient: 
 
 function ReportPage({ patient, detail, online, prediction, onRefer }: { patient: Patient; detail: GradeDetails; online: boolean; prediction: ModelPrediction | null; onRefer: () => void }) {
   const [printed, setPrinted] = useState(false)
-  return <><div className="flex flex-col justify-between gap-4 md:flex-row md:items-end"><div><p className="eyebrow">FHIR / ABDM-ready prototype</p><h1 className="page-title">Screening report</h1><p className="mt-2 text-sm text-slate-600">Structured as an interoperable screening record â€” no live ABDM, ABHA, or FHIR server integration.</p></div><div className="flex gap-3"><button onClick={() => { window.print(); setPrinted(true) }} className="btn-primary">ðŸ“„ Generate Patient Report (PDF)</button><button onClick={onRefer} className="btn-primary">Refer to specialist</button></div></div>{printed && <div className="mt-5 rounded-xl border border-teal-200 bg-teal-50 px-4 py-3 text-sm font-semibold text-teal-900">Print dialog requested. In a production integration, this would export a signed FHIR-compatible report.</div>}<div className="mt-6"><ReportViewer patient={patient} detail={detail} online={online} prediction={prediction} /></div><div className="mt-6 grid gap-4 md:grid-cols-3"><InfoPanel title="Patient" icon="P" text={`${patient.id} Â· screening date ${patient.screenDate}`} /><InfoPanel title="Observation" icon="O" text={`${detail.label} evidence and recommendation represented as prototype record fields.`} /><InfoPanel title="Service request" icon="R" text="Referral status can be carried to a specialist workflow when integrated." /></div></>
+  return <><div className="flex flex-col justify-between gap-4 md:flex-row md:items-end"><div><p className="eyebrow">FHIR / ABDM-ready prototype</p><h1 className="page-title">Screening report</h1><p className="mt-2 text-sm text-slate-600">Structured as an interoperable screening record â€” no live ABDM, ABHA, or FHIR server integration.</p></div><div className="flex gap-3"><button onClick={() => { window.print(); setPrinted(true) }} className="btn-primary">ðŸ“„ Generate Patient Report (PDF)</button><button onClick={onRefer} className="btn-primary">Refer to specialist</button></div></div>{printed && <div className="mt-5 rounded-xl border border-teal-200 bg-teal-50 px-4 py-3 text-sm font-semibold text-teal-900">Print dialog requested. In a production integration, this would export a signed FHIR-compatible report.</div>}<div className="mt-6"><ReportViewer patient={patient} detail={detail} online={online} prediction={prediction} /></div><div className="mt-6 grid gap-4 md:grid-cols-3"><InfoPanel title="Patient" icon="history" text={`${patient.id} Â· screening date ${patient.screenDate}`} /><InfoPanel title="Observation" icon="eye" text={`${detail.label} evidence and recommendation represented as prototype record fields.`} /><InfoPanel title="Service request" icon="shield-check" text="Referral status can be carried to a specialist workflow when integrated." /></div></>
 }
 
 function ReviewPage({ patient, detail }: { patient: Patient; detail: GradeDetails }) {
