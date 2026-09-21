@@ -35,6 +35,8 @@ ASSETS_DIR = DIST_DIR / "assets"
 ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 
 MODEL_VERSION = "v0.2-matlab-netv2-reconstructed"
+V3_4_MODEL_VERSION = "v3.4-matlab-coral-ordinal-experimental"
+V3_4_WEIGHTS_PATH = PROJECT_ROOT / "artifacts_output" / "v3_4" / "models" / "matlab_v3_4_full_weights.mat"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
 
@@ -74,6 +76,25 @@ class_names: list[str] = ["0", "1", "2", "3", "4"]
 transform: v2.Compose | None = None
 active_checkpoint_path: str = ""
 loaded_experiment_id: str = ""
+v3_4_model: torch.nn.Module | None = None
+
+
+def get_v3_4_model() -> torch.nn.Module:
+    """Lazy singleton loader for experimental V3.4 CORAL ordinal model.
+    
+    Loads exactly once on demand, keeping memory minimal until requested.
+    """
+    global v3_4_model
+    if v3_4_model is None:
+        from backend.v3_4_reconstruction import MatlabNetV3_4Reconstructed, DEFAULT_V3_4_WEIGHTS_PATH
+        target_weights = V3_4_WEIGHTS_PATH if V3_4_WEIGHTS_PATH.is_file() else DEFAULT_V3_4_WEIGHTS_PATH
+        if not target_weights.is_file():
+            raise FileNotFoundError(f"V3.4 weights not found at: {target_weights}")
+        logger.info(f"Loading experimental V3.4 CORAL model from: {target_weights}")
+        net = MatlabNetV3_4Reconstructed(target_weights)
+        v3_4_model = net.to(DEVICE).eval()
+        logger.info(f"Experimental V3.4 CORAL model loaded successfully on {DEVICE}")
+    return v3_4_model
 
 
 def get_process_rss_mb() -> float:
@@ -395,6 +416,7 @@ def startup() -> None:
             logger.info("Expected input shape: [1, 3, 384, 384]")
     logger.info(f"Active checkpoint path: {active_checkpoint_path}")
     logger.info(f"Checkpoint file exists: {Path(active_checkpoint_path).is_file() if active_checkpoint_path else False}")
+    logger.info(f"Experimental V3.4 model weights available: {V3_4_WEIGHTS_PATH.is_file()}")
     logger.info(f"Process RSS memory at startup: {rss_mb} MB")
     logger.info("==========================================================================")
     sys.stdout.flush()
@@ -412,6 +434,7 @@ def health() -> dict[str, object]:
         "experiment_id": loaded_experiment_id,
         "target_layer": "head_conv.conv (Reconstructed EfficientNet-B0 final conv layer)",
         "process_rss_mb": rss_mb,
+        "experimental_v3_4_available": V3_4_WEIGHTS_PATH.is_file(),
         "medical_disclaimer": "AI attention heatmap generated via PyTorch Grad-CAM (auxiliary explainability representation). Experimental software only; not for clinical diagnosis.",
     }
 
@@ -527,6 +550,232 @@ async def debug_gradcam(image: UploadFile = File(...)) -> dict[str, object]:
         "rss_before_cam_mb": rss_before_cam,
         "rss_after_cam_mb": rss_after_cam,
     }
+
+
+@app.post("/debug/v3_4")
+async def debug_v3_4(image: UploadFile = File(...)) -> dict[str, object]:
+    """Experimental inference endpoint for DrishtiMitra V3.4 CORAL Ordinal DR Classifier.
+    
+    Strictly isolated from the V2 production inference pipeline.
+    Runs exact MATLAB-matched bilinear resize + enhanceImageV2 LAB CLAHE + CORAL ordinal inference.
+    """
+    start_time = time.perf_counter()
+    stage = "request_received"
+
+    try:
+        rss_req = get_process_rss_mb()
+        logger.info(f"[DEBUG_V3_4] request received | filename={image.filename} | content_type={image.content_type} | rss_mb={rss_req}MB")
+        sys.stdout.flush()
+
+        content_type = (image.content_type or "").lower()
+        if content_type and not (content_type.startswith("image/") or content_type == "application/octet-stream"):
+            logger.warning(f"[DEBUG_V3_4][WARN] Invalid content_type: {content_type}")
+            raise HTTPException(status_code=415, detail="Upload a JPEG, PNG, or WebP fundus image.")
+
+        contents = await image.read(MAX_IMAGE_BYTES + 1)
+        if len(contents) > MAX_IMAGE_BYTES:
+            logger.warning(f"[DEBUG_V3_4][WARN] Image size exceeds limit: {len(contents)} > {MAX_IMAGE_BYTES}")
+            raise HTTPException(status_code=413, detail="Image exceeds the 12 MB limit.")
+        if len(contents) == 0:
+            logger.warning("[DEBUG_V3_4][WARN] Empty image file received.")
+            raise HTTPException(status_code=400, detail="The uploaded file is empty.")
+
+        # Stage 1: Decode image
+        stage = "image_decoded"
+        try:
+            with Image.open(io.BytesIO(contents)) as uploaded:
+                rgb_image = uploaded.convert("RGB")
+                orig_w, orig_h = rgb_image.size
+        except (UnidentifiedImageError, OSError) as error:
+            logger.warning(f"[DEBUG_V3_4][WARN] Failed to decode image: {error}")
+            raise HTTPException(status_code=400, detail="The uploaded file is not a valid image.") from error
+
+        del contents
+        logger.info(f"[DEBUG_V3_4] stage=image_decoded | orig_dimensions={orig_w}x{orig_h}")
+        sys.stdout.flush()
+
+        # Stage 2: Quality validation (production pipeline check)
+        stage = "validation"
+        is_valid_retina, error_reason = validate_retina_image(rgb_image)
+        if not is_valid_retina:
+            logger.warning(f"[DEBUG_V3_4][WARN] Retina validation rejected: {error_reason}")
+            raise HTTPException(status_code=400, detail=error_reason)
+
+        # Stage 3: Model acquisition via lazy singleton
+        stage = "model_load"
+        try:
+            m34 = get_v3_4_model()
+        except Exception as err:
+            logger.error(f"[DEBUG_V3_4] Failed to acquire V3.4 model: {err}")
+            raise HTTPException(status_code=503, detail=f"V3.4 experimental model unavailable: {err}") from err
+
+        # Stage 4: Preprocessing (MATLAB bilinear resize to 224x224)
+        stage = "preprocessing"
+        resized_image = rgb_image.resize((224, 224), resample=Image.Resampling.BILINEAR)
+        arr_224 = np.array(resized_image)
+
+        # Stage 5: Inference (enhanceImageV2 LAB CLAHE + CORAL forward pass)
+        stage = "inference"
+        inf_start = time.perf_counter()
+        res = m34.predict_single_image(arr_224, apply_clahe=True)
+        inf_ms = round((time.perf_counter() - inf_start) * 1000, 2)
+
+        # Compute interval probability mass for predicted grade (confidence)
+        p1 = res["cumulative_probs"]["P_ge_1"]
+        p2 = res["cumulative_probs"]["P_ge_2"]
+        p3 = res["cumulative_probs"]["P_ge_3"]
+        p4 = res["cumulative_probs"]["P_ge_4"]
+        pred_g = int(res["primary_grade"])
+
+        pmf = [
+            max(0.0, 1.0 - p1),
+            max(0.0, p1 - p2),
+            max(0.0, p2 - p3),
+            max(0.0, p3 - p4),
+            max(0.0, p4),
+        ]
+        sum_pmf = sum(pmf)
+        if sum_pmf > 0:
+            pmf = [p / sum_pmf for p in pmf]
+        confidence = round(float(pmf[pred_g]), 4)
+
+        total_ms = round((time.perf_counter() - start_time) * 1000, 2)
+        rss_end = get_process_rss_mb()
+        logger.info(f"[DEBUG_V3_4] inference complete | grade={pred_g} | latency={inf_ms}ms | rss_mb={rss_end}MB")
+        sys.stdout.flush()
+
+        return {
+            "status": "ok",
+            "model_version": V3_4_MODEL_VERSION,
+            "predicted_grade": pred_g,
+            "grade_name": res["primary_grade_name"],
+            "cumulative_probabilities": {
+                "P_ge_1": round(float(p1), 4),
+                "P_ge_2": round(float(p2), 4),
+                "P_ge_3": round(float(p3), 4),
+                "P_ge_4": round(float(p4), 4),
+            },
+            "expected_grade": round(float(res["expected_grade"]), 4),
+            "calibrated_grade": int(res["calibrated_grade"]),
+            "calibrated_grade_name": res["calibrated_grade_name"],
+            "confidence": confidence,
+            "is_referable": bool(res["is_referable"]),
+            "monotonicity_status": bool(res["monotonic"]),
+            "ordinal_score": round(float(res["score"]), 4),
+            "inference_latency_ms": inf_ms,
+            "inference_latency": inf_ms,
+            "total_latency_ms": total_ms,
+            "disclaimer": "Experimental research model only; not for clinical diagnosis or validation.",
+        }
+
+    except HTTPException:
+        sys.stdout.flush()
+        raise
+    except Exception as exc:
+        logger.error(f"[DEBUG_V3_4][ERROR] stage={stage}: {exc}")
+        logger.exception(exc)
+        sys.stdout.flush()
+        raise HTTPException(
+            status_code=502,
+            detail=f"V3.4 inference failed during stage '{stage}': {type(exc).__name__} - {str(exc)}",
+        ) from exc
+
+
+
+@app.post("/predict_v3_4")
+async def predict_v3_4(image: UploadFile = File(...)) -> dict[str, object]:
+    """V3.4 CORAL ordinal inference with frontend-compatible output."""
+    try:
+        import io
+        import numpy as np
+        from PIL import Image
+
+        contents = await image.read()
+
+        if not contents:
+            raise HTTPException(
+                status_code=400,
+                detail="Empty image file."
+            )
+
+        raw_rgb = np.array(
+            Image.open(io.BytesIO(contents)).convert("RGB")
+        )
+
+        v34 = get_v3_4_model()
+        result = v34.predict_single_image(
+            raw_rgb,
+            apply_clahe=True
+        )
+
+        cumulative = result["cumulative_probs"]
+
+        p = np.array([
+            cumulative["P_ge_1"],
+            cumulative["P_ge_2"],
+            cumulative["P_ge_3"],
+            cumulative["P_ge_4"],
+        ], dtype=float)
+
+        interval_probs = np.array([
+            1.0 - p[0],
+            p[0] - p[1],
+            p[1] - p[2],
+            p[2] - p[3],
+            p[3],
+        ])
+
+        interval_probs = np.clip(interval_probs, 0.0, 1.0)
+
+        grade = int(result["primary_grade"])
+        confidence = float(interval_probs[grade])
+
+        return {
+            "status": "ok",
+            "model_version": V3_4_MODEL_VERSION,
+            "grade": grade,
+            "label": str(grade),
+            "confidence": round(confidence, 4),
+            "probabilities": {
+                str(i): round(float(prob), 4)
+                for i, prob in enumerate(interval_probs)
+            },
+            "heatmap": None,
+            "medical_disclaimer": (
+                "Experimental research model only; "
+                "not for clinical diagnosis or validation."
+            ),
+            "performance_metrics": {
+                "inference_strategy": "V3.4 CORAL Ordinal Inference",
+                "forward_passes": 1,
+                "expected_grade": round(
+                    float(result["expected_grade"]), 4
+                ),
+                "calibrated_grade": int(
+                    result["calibrated_grade"]
+                ),
+                "is_referable": bool(
+                    result["is_referable"]
+                ),
+                "monotonicity": bool(
+                    result["monotonic"]
+                ),
+            },
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        logger.exception("[PREDICT_V3_4][ERROR] %s", exc)
+
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"V3.4 inference failed: "
+                f"{type(exc).__name__} - {str(exc)}"
+            ),
+        ) from exc
 
 
 @app.post("/predict")
@@ -703,7 +952,7 @@ async def predict(image: UploadFile = File(...)) -> dict[str, object]:
 # Mount compiled React assets and SPA fallback
 @app.get("/{full_path:path}")
 async def serve_spa(full_path: str):
-    if full_path in {"health", "predict", "debug/inference", "debug/gradcam"}:
+    if full_path in {"health", "predict", "debug/inference", "debug/gradcam", "debug/v3_4"}:
         raise HTTPException(status_code=404, detail="Not found")
     target_file = DIST_DIR / full_path
     if target_file.is_file():

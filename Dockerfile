@@ -27,6 +27,7 @@ RUN pip install --no-cache-dir -r /app/backend/requirements.txt
 COPY backend/ /app/backend/
 COPY --from=frontend-builder /app/dist /app/dist
 COPY artifacts/ /app/artifacts/
+COPY artifacts_output/ /app/artifacts_output/
 
 EXPOSE 8000
 
