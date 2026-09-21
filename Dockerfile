@@ -28,7 +28,7 @@ COPY backend/ /app/backend/
 COPY --from=frontend-builder /app/dist /app/dist
 COPY artifacts/ /app/artifacts/
 COPY artifacts_output/ /app/artifacts_output/
-RUN ls -lh /app/artifacts_output/v3_4/models/matlab_v3_4_full_weights.mat
+COPY artifacts_output/v3_4/models/matlab_v3_4_full_weights.mat /app/models/matlab_v3_4_full_weights.mat
 
 EXPOSE 8000
 

@@ -87,7 +87,16 @@ def get_v3_4_model() -> torch.nn.Module:
     global v3_4_model
     if v3_4_model is None:
         from backend.v3_4_reconstruction import MatlabNetV3_4Reconstructed, DEFAULT_V3_4_WEIGHTS_PATH
-        target_weights = V3_4_WEIGHTS_PATH if V3_4_WEIGHTS_PATH.is_file() else DEFAULT_V3_4_WEIGHTS_PATH
+        # Primary location (project artifacts)
+        target_weights = V3_4_WEIGHTS_PATH
+        # Fallback to default path defined in reconstruction module
+        if not target_weights.is_file():
+            target_weights = DEFAULT_V3_4_WEIGHTS_PATH
+        # Additional fallback: explicit copy location inside container
+        if not target_weights.is_file():
+            alt_path = Path("/app/models/matlab_v3_4_full_weights.mat")
+            if alt_path.is_file():
+                target_weights = alt_path
         if not target_weights.is_file():
             raise FileNotFoundError(f"V3.4 weights not found at: {target_weights}")
         logger.info(f"Loading experimental V3.4 CORAL model from: {target_weights}")
