@@ -20,3 +20,8 @@ artifacts/per_class_metrics.json
 artifacts/misclassified_samples.csv
 artifacts/confusion_matrix*.png
 artifacts/normalized_confusion_matrix*.png
+
+# Ignore everything under artifacts_output by default
+artifacts_output/
+# Exception: keep the experimental V3.4 checkpoint for Docker builds
+!artifacts_output/v3_4/models/matlab_v3_4_full_weights.mat
