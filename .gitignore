@@ -28,3 +28,7 @@ artifacts_output/
 .env.local
 .DS_Store
 Thumbs.db
+
+# -----------------------------------------------------------------
+# Exception: include the experimental V3.4 weight checkpoint for Docker
+!artifacts_output/v3_4/models/matlab_v3_4_full_weights.mat
