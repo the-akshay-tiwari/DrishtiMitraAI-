@@ -36,6 +36,7 @@ ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 
 MODEL_VERSION = "v0.2-matlab-netv2-reconstructed"
 V3_4_MODEL_VERSION = "v3.4-matlab-coral-ordinal-experimental"
+V3_4_CONTAINER_WEIGHTS_PATH = Path("/app/models/matlab_v3_4_full_weights.mat")
 V3_4_WEIGHTS_PATH = PROJECT_ROOT / "artifacts_output" / "v3_4" / "models" / "matlab_v3_4_full_weights.mat"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
@@ -79,6 +80,11 @@ loaded_experiment_id: str = ""
 v3_4_model: torch.nn.Module | None = None
 
 
+def v3_4_weights_available() -> bool:
+    """Report whether either supported V3.4 checkpoint location is present."""
+    return V3_4_CONTAINER_WEIGHTS_PATH.is_file() or V3_4_WEIGHTS_PATH.is_file()
+
+
 def get_v3_4_model() -> torch.nn.Module:
     """Lazy singleton loader for experimental V3.4 CORAL ordinal model.
     
@@ -88,15 +94,15 @@ def get_v3_4_model() -> torch.nn.Module:
     if v3_4_model is None:
         from backend.v3_4_reconstruction import MatlabNetV3_4Reconstructed, DEFAULT_V3_4_WEIGHTS_PATH
         # Try container-specific path first (weights copied by Dockerfile)
-        alt_path = Path("/app/models/matlab_v3_4_full_weights.mat")
-        if alt_path.is_file():
-            target_weights = alt_path
-        else:
-            # Primary location (project artifacts) as fallback
-            target_weights = V3_4_WEIGHTS_PATH
-            # Fallback to default path defined in reconstruction module
-            if not target_weights.is_file():
-                target_weights = DEFAULT_V3_4_WEIGHTS_PATH
+        candidate_paths = (
+            V3_4_CONTAINER_WEIGHTS_PATH,
+            V3_4_WEIGHTS_PATH,
+            DEFAULT_V3_4_WEIGHTS_PATH,
+        )
+        target_weights = next(
+            (path for path in candidate_paths if path.is_file()),
+            V3_4_CONTAINER_WEIGHTS_PATH,
+        )
         if not target_weights.is_file():
             raise FileNotFoundError(f"V3.4 weights not found at: {target_weights}")
         logger.info(f"Loading experimental V3.4 CORAL model from: {target_weights}")
@@ -425,7 +431,7 @@ def startup() -> None:
             logger.info("Expected input shape: [1, 3, 384, 384]")
     logger.info(f"Active checkpoint path: {active_checkpoint_path}")
     logger.info(f"Checkpoint file exists: {Path(active_checkpoint_path).is_file() if active_checkpoint_path else False}")
-    logger.info(f"Experimental V3.4 model weights available: {V3_4_WEIGHTS_PATH.is_file()}")
+    logger.info(f"Experimental V3.4 model weights available: {v3_4_weights_available()}")
     logger.info(f"Process RSS memory at startup: {rss_mb} MB")
     logger.info("==========================================================================")
     sys.stdout.flush()
@@ -443,7 +449,7 @@ def health() -> dict[str, object]:
         "experiment_id": loaded_experiment_id,
         "target_layer": "head_conv.conv (Reconstructed EfficientNet-B0 final conv layer)",
         "process_rss_mb": rss_mb,
-        "experimental_v3_4_available": V3_4_WEIGHTS_PATH.is_file(),
+        "experimental_v3_4_available": v3_4_weights_available(),
         "medical_disclaimer": "AI attention heatmap generated via PyTorch Grad-CAM (auxiliary explainability representation). Experimental software only; not for clinical diagnosis.",
     }
 

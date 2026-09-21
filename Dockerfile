@@ -27,8 +27,8 @@ RUN pip install --no-cache-dir -r /app/backend/requirements.txt
 COPY backend/ /app/backend/
 COPY --from=frontend-builder /app/dist /app/dist
 COPY artifacts/ /app/artifacts/
-COPY artifacts_output/ /app/artifacts_output/
 COPY artifacts_output/v3_4/models/matlab_v3_4_full_weights.mat /app/models/matlab_v3_4_full_weights.mat
+RUN test -s /app/models/matlab_v3_4_full_weights.mat
 
 EXPOSE 8000
 
